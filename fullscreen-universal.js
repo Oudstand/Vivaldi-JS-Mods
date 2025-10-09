@@ -353,7 +353,7 @@
                     position: absolute;
                     left: 0;
                     right: 0;
-                    z-index: 7;
+                    z-index: 5;
                 }
     
                 #header .vivaldi {
