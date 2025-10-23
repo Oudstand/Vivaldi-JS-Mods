@@ -26,6 +26,17 @@
     }, 300);
 
     class DialogMod {
+        // Animation constants
+        ANIMATION_DURATIONS = {
+            CLOSE_TIMEOUT: 800,      // Fallback timeout for close animation
+            FADE_DELAY: 90,          // Delay before starting fade animation
+            PROGRESS_CLEAR: 250,     // Progress bar clear timeout
+            OPTIONS_HIDE: 1500       // Options container hide delay
+        };
+
+        // Cached canvas context for text measurement (performance optimization)
+        #canvasContext = document.createElement('canvas').getContext('2d');
+
         webviews = new Map();
         iconUtils = new IconUtils();
         searchEngineUtils = new SearchEngineUtils(
@@ -93,7 +104,7 @@
         };
 
         /**
-         * Prepares url for search, calls dailogTab function
+         * Prepares url for search, calls dialogTab function
          * @param {String} engineId engine id of the engine to be used
          * @param {int} selectionText the text to search
          */
@@ -150,7 +161,15 @@
 
                     container.classList.remove('is-leave');
                     data.divContainer.remove();
-                    chrome.tabs.onRemoved.removeListener(data.tabCloseListener);
+
+                    // Clean up event listeners
+                    if (data.tabCloseListener) {
+                        chrome.tabs.onRemoved.removeListener(data.tabCloseListener);
+                    }
+                    if (data.pointerdownListener && data.fromPanel) {
+                        document.body.removeEventListener('pointerdown', data.pointerdownListener);
+                    }
+
                     this.webviews.delete(webviewId);
                 };
 
@@ -163,7 +182,7 @@
                 dialogTab.addEventListener('animationend', onCloseEnd);
 
                 // Fallback in case animationend doesn't fire
-                setTimeout(finishRemoval, 800);
+                setTimeout(finishRemoval, this.ANIMATION_DURATIONS.CLOSE_TIMEOUT);
             });
         }
 
@@ -205,7 +224,8 @@
                 divContainer: dialogContainer,
                 webview: webview,
                 fromPanel: fromPanel,
-                tabId: tabId
+                tabId: tabId,
+                pointerdownListener: null  // Will be set later if fromPanel is true
             });
 
             // remove dialogs when tab is closed without closing dialogs
@@ -241,7 +261,7 @@
                 clearTimeout(timeout);
             });
             optionsContainer.addEventListener('mouseleave', () => {
-                timeout = setTimeout(() => optionsContainer.innerHTML = this.iconUtils.ellipsis, 1500);
+                timeout = setTimeout(() => optionsContainer.innerHTML = this.iconUtils.ellipsis, this.ANIMATION_DURATIONS.OPTIONS_HIDE);
             });
             //#endregion
 
@@ -281,15 +301,14 @@
                     // Calculate the cursor position based on the click location
                     const offsetX = event.clientX - inputElement.getBoundingClientRect().left;
 
-                    // Create a canvas to measure text width
-                    const context = document.createElement('canvas').getContext('2d');
-                    context.font = window.getComputedStyle(inputElement).font;
+                    // Use cached canvas context for text measurement (performance)
+                    this.#canvasContext.font = window.getComputedStyle(inputElement).font;
 
                     // Measure the width of the text up to each character
                     let cursorPosition = 0,
                         textWidth = 0;
                     for (let i = 0; i < inputElement.value.length; i++) {
-                        const charWidth = context.measureText(inputElement.value[i]).width;
+                        const charWidth = this.#canvasContext.measureText(inputElement.value[i]).width;
                         if (textWidth + charWidth > offsetX) {
                             cursorPosition = i;
                             break;
@@ -304,11 +323,14 @@
                 }
             };
 
-            fromPanel && document.body.addEventListener('pointerdown', stopEvent);
+            if (fromPanel) {
+                document.body.addEventListener('pointerdown', stopEvent);
+                // Store listener reference for cleanup
+                this.webviews.get(webviewId).pointerdownListener = stopEvent;
+            }
 
             dialogContainer.addEventListener('click', (event) => {
                 if (event.target === dialogContainer) {
-                    fromPanel && document.body.removeEventListener('pointerdown', stopEvent);
                     this.removeDialog(webviewId);
                 }
             });
@@ -347,7 +369,7 @@
                             }
                         };
                         dialogTab.addEventListener('animationend', onOpenEnd);
-                    }, 90);
+                    }, this.ANIMATION_DURATIONS.FADE_DELAY);
                 });
             });
         }
@@ -382,13 +404,37 @@
                 webview = data ? data.webview : undefined;
             if (webview && document.getElementById(inputId) === null) {
                 const input = document.createElement('input', 'text'),
+                    // Allowed URL schemes for webview navigation
                     VALID_URL_PREFIXES = [
                         'http://',
                         'https://',
                         'file://',
-                        'vivaldi://'
+                        'vivaldi://',
+                        'chrome://',
+                        'chrome-extension://',
+                        'data:',
+                        'blob:'
                     ],
-                    isValidUrl = (url) => VALID_URL_PREFIXES.some(prefix => url.startsWith(prefix) || url === 'about:blank');
+                    // Blocked schemes that could be dangerous
+                    BLOCKED_SCHEMES = [
+                        'javascript:',
+                        'vbscript:'
+                    ],
+                    isValidUrl = (url) => {
+                        if (!url || typeof url !== 'string') return false;
+                        const trimmedUrl = url.trim();
+
+                        // Check for blocked schemes first
+                        if (BLOCKED_SCHEMES.some(scheme => trimmedUrl.toLowerCase().startsWith(scheme))) {
+                            return false;
+                        }
+
+                        // Allow about: pages
+                        if (trimmedUrl.startsWith('about:')) return true;
+
+                        // Check valid prefixes
+                        return VALID_URL_PREFIXES.some(prefix => trimmedUrl.startsWith(prefix));
+                    };
 
                 input.value = webview.src;
                 input.id = inputId;
@@ -448,10 +494,13 @@
         }
 
         /**
-         * Returns a random, verified id.
+         * Returns a unique, collision-resistant id.
+         * Uses timestamp + random alphanumeric string for uniqueness.
          */
         getWebviewId() {
-            return Math.floor(Math.random() * 10000) + new Date().getTime() % 1000;
+            const timestamp = Date.now();
+            const randomPart = Math.random().toString(36).substring(2, 11);
+            return `${timestamp}-${randomPart}`;
         }
 
         /**
@@ -509,7 +558,16 @@
                 }
             `;
 
-            webview.executeScript({code: instantiationCode});
+            try {
+                webview.executeScript({code: instantiationCode}, (result) => {
+                    if (chrome.runtime.lastError) {
+                        // Script injection failed (e.g., on chrome:// pages or blocked by CSP)
+                        console.debug('Dialog mod: Script injection failed:', chrome.runtime.lastError.message);
+                    }
+                });
+            } catch (error) {
+                console.debug('Dialog mod: Failed to execute script:', error);
+            }
         }
     }
 
@@ -805,6 +863,8 @@
     }
 
     class ProgressBar {
+        static CLEAR_DELAY = 250; // Delay before hiding progress bar after completion
+
         constructor(webviewId) {
             this.webviewId = webviewId;
             this.progress = 0;
@@ -851,7 +911,7 @@
                     this.progress = 0;
                     this.element.style.visibility = 'hidden';
                     this.element.style.width = this.progress + '%';
-                }, 250);
+                }, ProgressBar.CLEAR_DELAY);
             }
         }
     }
