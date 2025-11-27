@@ -88,8 +88,17 @@
 
         constructor() {
             this.#addStyle();
+            this.headerObserver = this.#createHeaderObserver();
+            this.#setupFeatures();
+        }
+
+        #setupFeatures() {
+            this.urlFieldMutationObserver?.disconnect();
+            this.titleMutationObserver?.disconnect();
+
             this.#placeYBDomainButton();
             this.#placeYBTitle();
+
             this.urlFieldMutationObserver = this.#createUrlFieldMutationObserver();
             this.titleMutationObserver = this.#createTitleMutationObserver();
         }
@@ -117,6 +126,22 @@
                 subtree: true
             });
             return titleMutationObserver;
+        }
+
+        #createHeaderObserver() {
+            const headerObserver = new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    for (const node of mutation.addedNodes) {
+                        if (node.id === 'titlebar') {
+                            this.#setupFeatures();
+                            return;
+                        }
+                    }
+                }
+            });
+
+            headerObserver.observe(this.#header, {childList: true});
+            return headerObserver;
         }
 
         #addDomainButtonListener() {
@@ -260,6 +285,10 @@
 
         get #head() {
             return document.querySelector('head');
+        }
+
+        get #header() {
+            return document.querySelector('#header');
         }
 
         get #title() {
