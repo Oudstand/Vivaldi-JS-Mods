@@ -1,23 +1,23 @@
 /*
- * Address Bar like in Yandex Browser
- * Forum link: https://forum.vivaldi.net/topic/96072/address-bar-like-in-yandex-browser
- * Written by @aminought
+ * Domain Button & Title in Address Bar
+ * Based on work by @aminought (https://forum.vivaldi.net/topic/96072/address-bar-like-in-yandex-browser)
+ * Refactored & Fixed for Vivaldi Fullscreen
  */
-(function yb_address_bar() {
+(function domain_title_bar() {
     "use strict";
 
     const STYLE = `
-        .UrlBar-AddressField:has(.YBDomain){
-            .UrlFragment--Lowlight:not(.YBDomain), .UrlFragment-LinkWrapper,.UrlFragment--Highlight:not(.YBTitle) {
+        .UrlBar-AddressField:has(.DomainText){
+            .UrlFragment--Lowlight:not(.DomainText), .UrlFragment-LinkWrapper,.UrlFragment--Highlight:not(.PageTitle) {
                 display: none;
             }
 
-            &:focus-within .YBDomainButton {
+            &:focus-within .DomainButton {
                 display: none;
             }
         }
 
-        .UrlFragments:has(.YBTitle) {
+        .UrlFragments:has(.PageTitle) {
             display: flex;
             width: 100%;
         }
@@ -26,7 +26,7 @@
             display: none;
         }
 
-        .YBDomainButton {
+        .DomainButton {
             background-color: var(--colorAccentBg);
             color: var(--colorAccentFg);
             height: 20px !important;
@@ -35,7 +35,7 @@
             display: flex;
             align-items: center;
 
-            &:has(.YBDomain:empty) {
+            &:has(.DomainText:empty) {
                 display: none;
             }
 
@@ -44,11 +44,11 @@
             }
         }
 
-        .YBDomainButton:hover {
+        .DomainButton:hover {
             background-color: var(--colorAccentBgAlpha);
         }
 
-        .YBDomain {
+        .DomainText {
             height: 100%;
             max-width: 10rem;
             overflow: hidden;
@@ -56,11 +56,11 @@
             white-space: nowrap;
         }
 
-        .YBDomain:hover:hover {
+        .DomainText:hover:hover {
           max-width: unset;
         }
 
-        .YBTitle {
+        .PageTitle {
             width: 100%;
             margin-left: 10px;
             margin-right: 10px;
@@ -82,13 +82,14 @@
         }
     `;
 
-    class YBAddressBar {
+    class DomainTitleBar {
         urlFieldMutationObserver = null;
         titleMutationObserver = null;
+        uiObserver = null;
 
         constructor() {
             this.#addStyle();
-            this.headerObserver = this.#createHeaderObserver();
+            this.uiObserver = this.#createUiObserver();
             this.#setupFeatures();
         }
 
@@ -96,8 +97,8 @@
             this.urlFieldMutationObserver?.disconnect();
             this.titleMutationObserver?.disconnect();
 
-            this.#placeYBDomainButton();
-            this.#placeYBTitle();
+            this.#placeDomainButton();
+            this.#placePageTitle();
 
             this.urlFieldMutationObserver = this.#createUrlFieldMutationObserver();
             this.titleMutationObserver = this.#createTitleMutationObserver();
@@ -107,45 +108,47 @@
 
         #createUrlFieldMutationObserver() {
             const urlFieldMutationObserver = new MutationObserver(() => {
-                this.#placeYBDomainButton();
-                this.#placeYBTitle();
+                this.#placeDomainButton();
+                this.#placePageTitle();
             });
-            urlFieldMutationObserver.observe(this.#urlFieldInput, {
-                attributes: true,
-                attributeFilter: ['value']
-            });
+            if (this.#urlFieldInput) {
+                urlFieldMutationObserver.observe(this.#urlFieldInput, {
+                    attributes: true,
+                    attributeFilter: ['value']
+                });
+            }
             return urlFieldMutationObserver;
         }
 
         #createTitleMutationObserver() {
             const titleMutationObserver = new MutationObserver(() => {
-                this.#placeYBTitle();
+                this.#placePageTitle();
             });
-            titleMutationObserver.observe(this.#title, {
-                childList: true,
-                subtree: true
-            });
+            if (this.#title) {
+                titleMutationObserver.observe(this.#title, {
+                    childList: true,
+                    subtree: true
+                });
+            }
             return titleMutationObserver;
         }
 
-        #createHeaderObserver() {
-            const headerObserver = new MutationObserver((mutations) => {
-                for (const mutation of mutations) {
-                    for (const node of mutation.addedNodes) {
-                        if (node.id === 'titlebar') {
-                            this.#setupFeatures();
-                            return;
-                        }
-                    }
+        #createUiObserver() {
+            const uiObserver = new MutationObserver((mutations) => {
+                // Check if AddressBar exists but our Button is missing (e.g. after Fullscreen toggle)
+                if (this.#urlBarAddressField && !this.#domainButton) {
+                    this.#setupFeatures();
                 }
             });
 
-            headerObserver.observe(this.#header, {childList: true});
-            return headerObserver;
+            if (this.#browser) {
+                uiObserver.observe(this.#browser, {attributes: true, attributeFilter: ['class']});
+            }
+            return uiObserver;
         }
 
         #addDomainButtonListener() {
-            this.#ybDomainButton.addEventListener('click', async (event) => {
+            this.#domainButton.addEventListener('click', async (event) => {
                 event.stopPropagation();
                 const domainInfo = await this.#getDomainInfo();
                 if (!domainInfo.clickable) return;
@@ -163,37 +166,37 @@
             return style;
         }
 
-        #createYBDomainButton(domainInfo) {
-            const ybDomainButton = document.createElement('button');
-            ybDomainButton.className = 'YBDomainButton';
+        #createDomainButton(domainInfo) {
+            const domainButton = document.createElement('button');
+            domainButton.className = 'DomainButton';
 
-            const ybDomain = this.#createYBDomain(domainInfo.domain);
-            ybDomainButton.appendChild(ybDomain);
+            const domainText = this.#createDomainText(domainInfo.domain);
+            domainButton.appendChild(domainText);
 
-            this.#urlBarAddressField.insertBefore(ybDomainButton, this.#urlBarUrlFieldWrapper);
+            this.#urlBarAddressField.insertBefore(domainButton, this.#urlBarUrlFieldWrapper);
             this.#addDomainButtonListener();
         }
 
-        #createYBDomain(domain) {
-            const ybDomain = document.createElement('div');
-            ybDomain.className = 'UrlFragment--Lowlight YBDomain';
-            ybDomain.innerText = this.#getDisplayDomain(domain);
-            return ybDomain;
+        #createDomainText(domain) {
+            const domainText = document.createElement('div');
+            domainText.className = 'UrlFragment--Lowlight DomainText';
+            domainText.innerText = this.#getDisplayDomain(domain);
+            return domainText;
         }
 
-        #createYbTitle() {
-            if (this.#ybTitle) return;
+        #createPageTitle() {
+            if (this.#pageTitle) return;
 
             if (!this.#urlFragmentWrapper) {
-                setTimeout(this.#createYbTitle.bind(this), 50);
+                setTimeout(this.#createPageTitle.bind(this), 50);
                 return;
             }
 
-            const ybTitle = document.createElement('div');
-            ybTitle.className = 'UrlFragment--Highlight YBTitle';
-            ybTitle.innerText = this.#getTitle();
+            const pageTitle = document.createElement('div');
+            pageTitle.className = 'UrlFragment--Highlight PageTitle';
+            pageTitle.innerText = this.#getTitle();
 
-            this.#urlFragmentWrapper.appendChild(ybTitle);
+            this.#urlFragmentWrapper.appendChild(pageTitle);
         }
 
         // actions
@@ -202,22 +205,22 @@
             this.#head.appendChild(this.#createStyle());
         }
 
-        async #placeYBDomainButton() {
+        async #placeDomainButton() {
             const domainInfo = await this.#getDomainInfo();
             if (!this.#urlBarAddressField) return;
 
-            if (this.#ybDomain) {
-                this.#ybDomain.innerText = this.#getDisplayDomain(domainInfo.domain);
+            if (this.#domainText) {
+                this.#domainText.innerText = this.#getDisplayDomain(domainInfo.domain);
             } else {
-                this.#createYBDomainButton(domainInfo);
+                this.#createDomainButton(domainInfo);
             }
         }
 
-        #placeYBTitle() {
-            if (!this.#ybTitle) {
-                this.#createYbTitle();
+        #placePageTitle() {
+            if (!this.#pageTitle) {
+                this.#createPageTitle();
             } else {
-                this.#ybTitle.innerText = this.#getTitle();
+                this.#pageTitle.innerText = this.#getTitle();
             }
         }
 
@@ -231,7 +234,7 @@
             if (!this.#title) return '';
 
             let title = this.#title.innerText;
-            if (title === 'Vivaldi') {
+            if (title === 'Vivaldi' && this.#activeWebview) {
                 title = this.#parseTitleFromUrl(this.#activeWebview.getAttribute('src'));
             }
 
@@ -257,7 +260,8 @@
 
         #parseVivaldiDomain(url) {
             const regexp = /vivaldi:\/\/([^\/]*)/;
-            return url.match(regexp)[1];
+            const match = url.match(regexp);
+            return match ? match[1] : url;
         }
 
         async #parseUrlDomain(url) {
@@ -269,8 +273,12 @@
             } else if (url.startsWith('about:')) {
                 return {type: 'about', domain: url, clickable: true};
             } else if (url.startsWith('chrome-extension://')) {
-                let extension = await chrome.management.get(url.match(/chrome-extension:\/\/([^/]+)/)[1]);
-                return {type: 'extension', domain: extension.name, clickable: false};
+                try {
+                    let extension = await chrome.management.get(url.match(/chrome-extension:\/\/([^/]+)/)[1]);
+                    return {type: 'extension', domain: extension.name, clickable: false};
+                } catch(e) {
+                     return {type: 'extension', domain: 'Extension', clickable: false};
+                }
             } else {
                 return {type: 'url', domain: url, clickable: true};
             }
@@ -278,17 +286,18 @@
 
         #parseTitleFromUrl(title) {
             const regexp = /\/([^\/]*)$/;
-            return title.match(regexp)[1];
+            const match = title.match(regexp);
+            return match ? match[1] : title;
         }
 
         // getters
 
-        get #head() {
-            return document.querySelector('head');
+        get #browser() {
+            return document.querySelector('#browser');
         }
 
-        get #header() {
-            return document.querySelector('#header');
+        get #head() {
+            return document.querySelector('head');
         }
 
         get #title() {
@@ -323,22 +332,22 @@
             return document.querySelector('.UrlBar-AddressField span.UrlFragment--Highlight');
         }
 
-        get #ybDomainButton() {
-            return document.querySelector('.YBDomainButton');
+        get #domainButton() {
+            return document.querySelector('.DomainButton');
         }
 
-        get #ybDomain() {
-            return document.querySelector('.UrlFragment--Lowlight.YBDomain');
+        get #domainText() {
+            return document.querySelector('.UrlFragment--Lowlight.DomainText');
         }
 
-        get #ybTitle() {
-            return document.querySelector('.YBTitle');
+        get #pageTitle() {
+            return document.querySelector('.PageTitle');
         }
     }
 
     function initMod() {
         if (document.querySelector('#urlFieldInput')) {
-            window.ybAddressBar = new YBAddressBar();
+            window.domainTitleBar = new DomainTitleBar();
         } else {
             setTimeout(initMod, 500);
         }
