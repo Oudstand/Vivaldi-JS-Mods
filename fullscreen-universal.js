@@ -356,10 +356,6 @@
                     z-index: 5;
                 }
     
-                #header .vivaldi {
-                    margin-top: 3px;
-                }
-    
                 #main {
                     padding-top: 0 !important;
                     position: absolute;
