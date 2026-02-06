@@ -24,7 +24,7 @@
     }, 300);
 
     class FullscreenMod {
-        positions = ['top', 'bottom', 'left', 'right']
+        positions = ['top', 'bottom', 'left', 'right'];
 
         fullscreenEnabled;
 
@@ -58,15 +58,13 @@
                 updateHoverDivs: this.updateHoverDivs.bind(this)
             };
 
-            chrome.storage.local.get('fullScreenModEnabled').then((value) => {
-                    this.fullscreenEnabled = value.fullScreenModEnabled || value.fullScreenModEnabled == undefined;
+            chrome.storage.local.get('fullScreenModEnabled').then(value => {
+                this.fullscreenEnabled = value.fullScreenModEnabled || value.fullScreenModEnabled == undefined;
 
-                    if (this.fullscreenEnabled) {
-                        this.addFullScreenListener();
-                    }
+                if (this.fullscreenEnabled) {
+                    this.addFullScreenListener();
                 }
-            )
-            ;
+            });
             vivaldi.tabsPrivate.onKeyboardShortcut.addListener((id, combination) => combination === 'F11' && id === vivaldiWindowId && this.toggleFullScreen());
         }
 
@@ -79,7 +77,7 @@
                     ${this.rightCSS()}
                     ${this.bottomCSS()}
                 }
-        
+
                 #app:not(.fullscreen-listener-enabled) .hover-div {
                     visibility: hidden;
                 }
@@ -105,7 +103,10 @@
             this.hoverDivTop = this.createHorizontalHoverDiv('top');
             this.hoverDivLeft = (hidePanels && this.panelsLeft) || this.tabBarPosition === 'left' ? this.createVerticalHoverDiv('left') : undefined;
             this.hoverDivRight = (hidePanels && this.panelsRight) || this.tabBarPosition === 'right' ? this.createVerticalHoverDiv('right') : undefined;
-            this.hoverDivBottom = !this.addressBarTop || this.tabBarPosition === 'bottom' || !this.bookmarksTop || document.querySelector('#footer').childNodes.length ? this.createHorizontalHoverDiv('bottom') : undefined;
+            this.hoverDivBottom =
+                !this.addressBarTop || this.tabBarPosition === 'bottom' || !this.bookmarksTop || document.querySelector('#footer').childNodes.length
+                    ? this.createHorizontalHoverDiv('bottom')
+                    : undefined;
         }
 
         destroyHoverDivs() {
@@ -116,11 +117,10 @@
         }
 
         rebuildStyle() {
-            this.createStyle();          // CSS + Hover-Divs aus aktueller DOM-Lage
+            this.createStyle(); // CSS + Hover-Divs aus aktueller DOM-Lage
             if (updateHoverDivSize) this.updateHoverDivs();
-            this.scheduleHeights();      // CSS-Variablen (--fs-*) frisch berechnen
+            this.scheduleHeights(); // CSS-Variablen (--fs-*) frisch berechnen
         }
-
 
         toggleFullScreen() {
             this.fullscreenEnabled = !this.fullscreenEnabled;
@@ -230,7 +230,7 @@
         }
 
         setVerticalHoverDivWidth(hoverDiv) {
-            hoverDiv.style.width = updateHoverDivSize && this.isWindowMaximized() ? '1px' : '1.5rem'
+            hoverDiv.style.width = updateHoverDivSize && this.isWindowMaximized() ? '1px' : '1.5rem';
         }
 
         updateHoverDivs() {
@@ -275,7 +275,9 @@
 
             this.subcontainerObserver = new MutationObserver(mutations => {
                 for (const mutation of mutations) {
-                    const hit = [...mutation.addedNodes, ...mutation.removedNodes].some(node => node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer');
+                    const hit = [...mutation.addedNodes, ...mutation.removedNodes].some(
+                        node => node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer'
+                    );
 
                     if (hit) {
                         this.scheduleHeights();
@@ -339,23 +341,23 @@
                 #header, .mainbar, .bookmark-bar, #panels-container {
                     transition: transform .5s, opacity .5s ease-in-out, visibility .5s ease-in-out !important;
                 }
-    
+
                 #header, .mainbar {
                     z-index: 8;
                 }
-                
+
                 .mainbar {
                     position: absolute;
                     width: 100%;
                 }
-    
+
                 .bookmark-bar  {
                     position: absolute;
                     left: 0;
                     right: 0;
                     z-index: 5;
                 }
-    
+
                 #main {
                     padding-top: 0 !important;
                     position: absolute;
@@ -363,20 +365,20 @@
                     bottom: 0;
                     left: 0;
                     right: 0;
-    
+
                     .inner {
-                        position: unset;                  
+                        position: unset;
                     }
                 }
-    
+
                 .extensionIconPopupMenu, .button-popup {
                     z-index: 8;
                 }
-    
+
                 footer {
                     margin-top: auto !important;
                 }
-    
+
                 .hover-div {
                     transition: visibility 0.5s ease-in-out;
                 }
@@ -411,7 +413,7 @@
                         opacity: 0;
                     }
                 }
-    
+
                 &:not(.hidden-top) .hover-div.top {
                     visibility: hidden;
                 }
@@ -424,7 +426,7 @@
                             ${!alwaysShowAddressBar ? '#browser:has(.internal-page .startpage .SpeedDialView), #browser:has(.internal-page .startpage .Dashboard), #browser:has(.UrlBar-AddressField:focus-within) {' : ''}
                                 .mainbar:has(.UrlBar-AddressField), #header:has(.UrlBar-AddressField) {
                                     opacity: 1;
-        
+
                                     .UrlBar-AddressField {
                                         position: absolute;
                                         top: calc(var(--fs-top-offset, 0px) + ${showAddressBarPadding}px);
@@ -497,7 +499,7 @@
                         visibility: hidden;
                     }
                 }
-    
+
                 &:not(.hidden-left) .hover-div.left {
                     visibility: hidden;
                 }
@@ -511,7 +513,7 @@
                         left: ${this.panelsLeft ? this.panelsContainer.offsetWidth : 0}px;
                         z-index: 1;
                         transition: transform .5s, opacity .5s ease-in-out !important;
-    
+
                         &  > .tabbar-wrapper {
                             position: static;
                         }
@@ -558,7 +560,7 @@
                         visibility: hidden;
                     }
                 }
-    
+
                 &:not(.hidden-right) .hover-div.right {
                     visibility: hidden;
                 }
@@ -572,7 +574,7 @@
                         right: ${this.panelsRight ? this.panelsContainer.offsetWidth : 0}px;
                         z-index: 1;
                         transition: transform .5s, opacity .5s ease-in-out !important;
-    
+
                         &  > .tabbar-wrapper {
                             position: static;
                         }
@@ -607,7 +609,7 @@
                         opacity: 0;
                     }
                 }
-    
+
                 &:not(.hidden-bottom) .hover-div.bottom {
                     visibility: hidden;
                 }
@@ -634,7 +636,7 @@
                            ${!alwaysShowAddressBar ? '#browser:has(.internal-page .startpage), #browser:has(.UrlBar-AddressField:focus-within) {' : ''}
                                 .mainbar {
                                     opacity: 1;
-        
+
                                     .UrlBar-AddressField {
                                         position: absolute;
                                         bottom: calc(var(--fs-main-bar-height, 0px) + 10px + ${showAddressBarPadding}px);
@@ -679,7 +681,7 @@
         }
 
         get webView() {
-            return document.querySelector('#webview-container')
+            return document.querySelector('#webview-container');
         }
 
         get header() {
