@@ -5,7 +5,7 @@
 # ==========================================
 
 # Vivaldi Installationspfad unter CachyOS/Arch
-VIVALDI_DIR="/opt/vivaldi/resources/vivaldi"
+VIVALDI_DIR="/opt/vivaldi-snapshot./pa/resources/vivaldi"
 HTML_FILE="$VIVALDI_DIR/window.html"
 
 # Pfade automatisch ermitteln
