@@ -5,7 +5,7 @@
 # ==========================================
 
 # Vivaldi Installationspfad unter CachyOS/Arch
-VIVALDI_DIR="/opt/vivaldi-snapshot./pa/resources/vivaldi"
+VIVALDI_DIR="/opt/vivaldi-snapshot/resources/vivaldi"
 HTML_FILE="$VIVALDI_DIR/window.html"
 
 # Pfade automatisch ermitteln
@@ -88,4 +88,4 @@ sudo sed -i 's|</body>|  <script src="custom.js"></script>\n</body>|' "$HTML_FIL
 # ==========================================
 echo "Fertig! Starte Vivaldi..."
 # Startet Vivaldi im Hintergrund und entkoppelt es vom Terminal
-nohup vivaldi >/dev/null 2>&1 &
+nohup vivaldi-snapshot >/dev/null 2>&1 &
