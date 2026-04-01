@@ -28,10 +28,10 @@
     class DialogMod {
         // Animation constants
         ANIMATION_DURATIONS = {
-            CLOSE_TIMEOUT: 800,      // Fallback timeout for close animation
-            FADE_DELAY: 90,          // Delay before starting fade animation
-            PROGRESS_CLEAR: 250,     // Progress bar clear timeout
-            OPTIONS_HIDE: 1500       // Options container hide delay
+            CLOSE_TIMEOUT: 800, // Fallback timeout for close animation
+            FADE_DELAY: 90, // Delay before starting fade animation
+            PROGRESS_CLEAR: 250, // Progress bar clear timeout
+            OPTIONS_HIDE: 1500 // Options container hide delay
         };
 
         // Cached canvas context for text measurement (performance optimization)
@@ -40,7 +40,7 @@
         webviews = new Map();
         iconUtils = new IconUtils();
         searchEngineUtils = new SearchEngineUtils(
-            (url) => this.dialogTab(url),
+            url => this.dialogTab(url),
             (engineId, searchText) => this.dialogTabSearch(engineId, searchText),
             CONTEXT_MENU_CONFIG
         );
@@ -69,7 +69,7 @@
             vivaldi.tabsPrivate.onKeyboardShortcut.addListener(this.keyCombo.bind(this));
 
             new WebsiteInjectionUtils(
-                (navigationDetails) => this.getWebviewConfig(navigationDetails),
+                navigationDetails => this.getWebviewConfig(navigationDetails),
                 (url, fromPanel, origin) => this.dialogTab(url, fromPanel, origin), // pass origin through
                 ICON_CONFIG
             );
@@ -79,7 +79,7 @@
          * Finds the correct configuration for showing the dialog
          */
         getWebviewConfig(navigationDetails) {
-            if (navigationDetails.frameType !== "outermost_frame") return {webview: null, fromPanel: false};
+            if (navigationDetails.frameType !== 'outermost_frame') return {webview: null, fromPanel: false};
 
             // first dialog from tab or webpanel
             let webview = document.querySelector(`webview[tab_id="${navigationDetails.tabId}"]`);
@@ -100,8 +100,8 @@
          */
         async searchForSelectedText() {
             const tabs = await chrome.tabs.query({active: true});
-            vivaldi.utilities.getSelectedText(tabs[0].id, (text) => this.dialogTabSearch(this.searchEngineUtils.defaultSearchId, text));
-        };
+            vivaldi.utilities.getSelectedText(tabs[0].id, text => this.dialogTabSearch(this.searchEngineUtils.defaultSearchId, text));
+        }
 
         /**
          * Prepares url for search, calls dialogTab function
@@ -146,15 +146,15 @@
             this.setAnchoredTransformVars(dialogTab, pointerX, pointerY);
 
             requestAnimationFrame(() => {
-                container.classList.remove('is-open');   // overlay fades out via transition
-                container.classList.add('is-leave');     // optional: block clicks
+                container.classList.remove('is-open'); // overlay fades out via transition
+                container.classList.add('is-leave'); // optional: block clicks
                 // remove blur immediately so background is crisp while closing
                 container.style.backdropFilter = 'none';
 
                 dialogTab.classList.add('animating-close');
 
                 const finishRemoval = () => {
-                    chrome.tabs.query({}, (tabs) => {
+                    chrome.tabs.query({}, tabs => {
                         const tab = tabs.find(tab => tab.vivExtData && tab.vivExtData.includes(`${webviewId}tabId`));
                         if (tab) chrome.tabs.remove(tab.id);
                     });
@@ -173,7 +173,7 @@
                     this.webviews.delete(webviewId);
                 };
 
-                const onCloseEnd = (e) => {
+                const onCloseEnd = e => {
                     if (e.animationName === 'dialog-tab-close-anchored') {
                         dialogTab.removeEventListener('animationend', onCloseEnd);
                         finishRemoval();
@@ -193,7 +193,7 @@
          * @param {{x:number, y:number}} origin the viewport coordinates to anchor the animation
          */
         dialogTab(linkUrl, fromPanel = undefined, origin = undefined) {
-            chrome.windows.getLastFocused((window) => {
+            chrome.windows.getLastFocused(window => {
                 if (window.id === vivaldiWindowId && window.state !== chrome.windows.WindowState.MINIMIZED) {
                     this.showDialog(linkUrl, fromPanel, origin); // pass origin through
                 }
@@ -225,12 +225,12 @@
                 webview: webview,
                 fromPanel: fromPanel,
                 tabId: tabId,
-                pointerdownListener: null  // Will be set later if fromPanel is true
+                pointerdownListener: null // Will be set later if fromPanel is true
             });
 
             // remove dialogs when tab is closed without closing dialogs
             if (!fromPanel) {
-                const clearWebviews = (closedTabId) => {
+                const clearWebviews = closedTabId => {
                     if (tabId === closedTabId) {
                         this.webviews.forEach((view, key) => view.tabCloseListener === clearWebviews && this.removeDialog(key));
                         chrome.tabs.onRemoved.removeListener(clearWebviews);
@@ -261,7 +261,7 @@
                 clearTimeout(timeout);
             });
             optionsContainer.addEventListener('mouseleave', () => {
-                timeout = setTimeout(() => optionsContainer.innerHTML = this.iconUtils.ellipsis, this.ANIMATION_DURATIONS.OPTIONS_HIDE);
+                timeout = setTimeout(() => (optionsContainer.innerHTML = this.iconUtils.ellipsis), this.ANIMATION_DURATIONS.OPTIONS_HIDE);
             });
             //#endregion
 
@@ -280,18 +280,18 @@
                 }
             });
             webview.addEventListener('loadstop', () => progressBar.clear(true));
-            fromPanel && webview.addEventListener('mousedown', (event) => event.stopPropagation());
+            fromPanel && webview.addEventListener('mousedown', event => event.stopPropagation());
             //#endregion
 
             //#region dialogContainer properties
             dialogContainer.setAttribute('class', 'dialog-container');
 
-            const pointerX = (origin?.x ?? window.innerWidth / 2);
-            const pointerY = (origin?.y ?? window.innerHeight / 2);
+            const pointerX = origin?.x ?? window.innerWidth / 2;
+            const pointerY = origin?.y ?? window.innerHeight / 2;
             dialogContainer.dataset.pointerX = String(pointerX);
             dialogContainer.dataset.pointerY = String(pointerY);
 
-            const stopEvent = (event) => {
+            const stopEvent = event => {
                 event.preventDefault();
                 event.stopPropagation();
 
@@ -329,7 +329,7 @@
                 this.webviews.get(webviewId).pointerdownListener = stopEvent;
             }
 
-            dialogContainer.addEventListener('click', (event) => {
+            dialogContainer.addEventListener('click', event => {
                 if (event.target === dialogContainer) {
                     this.removeDialog(webviewId);
                 }
@@ -359,7 +359,7 @@
                     setTimeout(() => {
                         dialogTab.classList.add('animating-open');
 
-                        const onOpenEnd = (e) => {
+                        const onOpenEnd = e => {
                             if (e.animationName === 'dialog-tab-open-anchored') {
                                 dialogTab.classList.remove('animating-open');
                                 // cleanup inline styles
@@ -405,22 +405,10 @@
             if (webview && document.getElementById(inputId) === null) {
                 const input = document.createElement('input', 'text'),
                     // Allowed URL schemes for webview navigation
-                    VALID_URL_PREFIXES = [
-                        'http://',
-                        'https://',
-                        'file://',
-                        'vivaldi://',
-                        'chrome://',
-                        'chrome-extension://',
-                        'data:',
-                        'blob:'
-                    ],
+                    VALID_URL_PREFIXES = ['http://', 'https://', 'file://', 'vivaldi://', 'chrome://', 'chrome-extension://', 'data:', 'blob:'],
                     // Blocked schemes that could be dangerous
-                    BLOCKED_SCHEMES = [
-                        'javascript:',
-                        'vbscript:'
-                    ],
-                    isValidUrl = (url) => {
+                    BLOCKED_SCHEMES = ['javascript:', 'vbscript:'],
+                    isValidUrl = url => {
                         if (!url || typeof url !== 'string') return false;
                         const trimmedUrl = url.trim();
 
@@ -440,7 +428,7 @@
                 input.id = inputId;
                 input.setAttribute('class', 'dialog-input');
 
-                input.addEventListener('keydown', async (event) => {
+                input.addEventListener('keydown', async event => {
                     if (event.key === 'Enter') {
                         let value = input.value;
                         if (isValidUrl(value)) {
@@ -463,7 +451,7 @@
                             cls: 'reader-view-toggle'
                         },
                         {content: this.iconUtils.newTab, action: this.openNewTab.bind(this, inputId, true)},
-                        {content: this.iconUtils.backgroundTab, action: this.openNewTab.bind(this, inputId, false)},
+                        {content: this.iconUtils.backgroundTab, action: this.openNewTab.bind(this, inputId, false)}
                     ];
 
                 buttons.forEach(button => fragment.appendChild(this.createOptionsButton(button.content, button.action, button.cls || '')));
@@ -531,18 +519,17 @@
     }
 
     class WebsiteInjectionUtils {
-
         constructor(getWebviewConfig, openDialog, iconConfig) {
             this.iconConfig = JSON.stringify(iconConfig);
 
             // inject detection of click observers
-            chrome.webNavigation.onCompleted.addListener((navigationDetails) => {
+            chrome.webNavigation.onCompleted.addListener(navigationDetails => {
                 const {webview, fromPanel} = getWebviewConfig(navigationDetails);
                 webview && this.injectCode(webview, fromPanel);
             });
 
             // react on demand to open a dialog
-            chrome.runtime.onMessage.addListener((message) => {
+            chrome.runtime.onMessage.addListener(message => {
                 if (message.url) {
                     openDialog(message.url, message.fromPanel, message.origin);
                 }
@@ -559,7 +546,7 @@
             `;
 
             try {
-                webview.executeScript({code: instantiationCode}, (result) => {
+                webview.executeScript({code: instantiationCode}, result => {
                     if (chrome.runtime.lastError) {
                         // Script injection failed (e.g., on chrome:// pages or blocked by CSP)
                         console.debug('Dialog mod: Script injection failed:', chrome.runtime.lastError.message);
@@ -576,7 +563,7 @@
             this.fromPanel = fromPanel;
             this.config = config;
             this.icon = null;
-            this.timers = {showIcon: null, showDialog: null, hideIcon: null}
+            this.timers = {showIcon: null, showDialog: null, hideIcon: null};
 
             this.#initialize();
         }
@@ -598,7 +585,7 @@
         #setupMouseHandling() {
             let holdTimerForMiddleClick;
 
-            document.addEventListener('pointerdown', (event) => {
+            document.addEventListener('pointerdown', event => {
                 // Check if the Ctrl key, Alt key, and mouse button were pressed
                 if (event.ctrlKey && event.altKey && [0, 1].includes(event.button)) {
                     this.#callDialog(event);
@@ -606,7 +593,8 @@
                     // MMB-hold: cache link+coords NOW, use after timeout (prevents drift)
                     const link = this.#getLinkElement(event);
                     if (!link) return;
-                    const px = event.clientX, py = event.clientY;
+                    const px = event.clientX,
+                        py = event.clientY;
                     const href = link.href;
                     holdTimerForMiddleClick = setTimeout(() => {
                         this.#sendDialogMessage(href, px, py);
@@ -614,35 +602,38 @@
                 }
             });
 
-            document.addEventListener('pointerup', (event) => {
+            document.addEventListener('pointerup', event => {
                 if (event.button === 1) clearTimeout(holdTimerForMiddleClick);
             });
         }
 
         #setupIconHandling() {
             this.#createIcon();
-            this.#createIconStyle()
+            this.#createIconStyle();
 
-            document.addEventListener('mouseover', this.debounce((event) => {
-                const link = this.#getLinkElement(event);
-                if (!link) return;
+            document.addEventListener(
+                'mouseover',
+                this.debounce(event => {
+                    const link = this.#getLinkElement(event);
+                    if (!link) return;
 
-                clearTimeout(this.timers.hideIcon);
+                    clearTimeout(this.timers.hideIcon);
 
-                requestAnimationFrame(() => {
-                    const rect = link.getBoundingClientRect();
-                    Object.assign(this.icon.style, {
-                        display: 'block',
-                        left: `${rect.right + 5}px`,
-                        top: `${rect.top + window.scrollY}px`
+                    requestAnimationFrame(() => {
+                        const rect = link.getBoundingClientRect();
+                        Object.assign(this.icon.style, {
+                            display: 'block',
+                            left: `${rect.right + 5}px`,
+                            top: `${rect.top + window.scrollY}px`
+                        });
                     });
-                });
 
-                this.icon.dataset.targetUrl = link.href;
-                this.currentLinkEl = link;
+                    this.icon.dataset.targetUrl = link.href;
+                    this.currentLinkEl = link;
 
-                link.addEventListener('mouseleave', this.#hideLinkIcon.bind(this));
-            }, this.config.showIconDelay));
+                    link.addEventListener('mouseleave', this.#hideLinkIcon.bind(this));
+                }, this.config.showIconDelay)
+            );
         }
 
         #createIcon() {
@@ -681,10 +672,13 @@
         }
 
         #hideLinkIcon() {
-            this.timers.hideIcon = setTimeout(() => {
-                this.icon.style.display = 'none';
-                clearTimeout(this.timers.showIcon);
-            }, this.config.linkIconInteractionOnHover ? 300 : 600);
+            this.timers.hideIcon = setTimeout(
+                () => {
+                    this.icon.style.display = 'none';
+                    clearTimeout(this.timers.showIcon);
+                },
+                this.config.linkIconInteractionOnHover ? 300 : 600
+            );
         }
 
         #getLinkElement(event) {
@@ -701,7 +695,7 @@
                 event.preventDefault();
                 this.#sendDialogMessage(link.href, event.clientX, event.clientY);
             }
-        };
+        }
 
         #createIconStyle() {
             const style = document.createElement('style');
@@ -726,15 +720,14 @@
             return (...args) => {
                 clearTimeout(timer);
                 timer = setTimeout(fn.bind(this, ...args), delay);
-            }
-        };
+            };
+        }
     }
 
     /**
      * Utility class for adding and updating context menu items
      */
     class SearchEngineUtils {
-
         /**
          * Constructor for SearchEngineUtils
          * @param {Function} openLinkCallback - Callback for opening links
@@ -805,7 +798,7 @@
                 contexts: ['selection']
             });
 
-            chrome.contextMenus.onClicked.addListener((itemInfo) => {
+            chrome.contextMenus.onClicked.addListener(itemInfo => {
                 const {menuItemId, parentMenuItemId, linkUrl, selectionText} = itemInfo;
 
                 if (menuItemId === this.LINK_ID) {
@@ -848,7 +841,7 @@
          * Creates sub-context menu items for select search engine menu item
          */
         #createContextMenuSelectSearch() {
-            this.searchEngineCollection.forEach((engine) => {
+            this.searchEngineCollection.forEach(engine => {
                 if (!this.createdContextMenuMap.has(engine.guid)) {
                     chrome.contextMenus.create({
                         id: this.SELECT_SEARCH_ID + engine.guid,
@@ -916,39 +909,46 @@
         }
     }
 
-
     /**
      * Utility class to manage SVG icons
      * @class
      */
     class IconUtils {
-
         // Static icons
         static SVG = {
-            ellipsis: '<svg xmlns="http://www.w3.org/2000/svg" height="2em" viewBox="0 0 448 512"><path d="M8 256a56 56 0 1 1 112 0A56 56 0 1 1 8 256zm160 0a56 56 0 1 1 112 0 56 56 0 1 1 -112 0zm216-56a56 56 0 1 1 0 112 56 56 0 1 1 0-112z"/></svg>',
-            readerView: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path d="M3 4h10v1H3zM3 6h10v1H3zM3 8h10v1H3zM3 10h6v1H3z"></path></svg>',
+            ellipsis:
+                '<svg xmlns="http://www.w3.org/2000/svg" height="2em" viewBox="0 0 448 512"><path d="M8 256a56 56 0 1 1 112 0A56 56 0 1 1 8 256zm160 0a56 56 0 1 1 112 0 56 56 0 1 1 -112 0zm216-56a56 56 0 1 1 0 112 56 56 0 1 1 0-112z"/></svg>',
+            readerView:
+                '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path d="M3 4h10v1H3zM3 6h10v1H3zM3 8h10v1H3zM3 10h6v1H3z"></path></svg>',
             newTab: '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 512 512"><path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32h82.7L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3V192c0 17.7 14.3 32 32 32s32-14.3 32-32V32c0-17.7-14.3-32-32-32H320zM80 32C35.8 32 0 67.8 0 112V432c0 44.2 35.8 80 80 80H400c44.2 0 80-35.8 80-80V320c0-17.7-14.3-32-32-32s-32-14.3-32-32V432c0 8.8-7.2 16-16 16H80c-8.8 0-16-7.2-16-16V112c0-8.8 7.2-16 16-16H192c17.7 0 32-14.3 32-32s-14.3-32-32-32H80z"/></svg>',
-            backgroundTab: '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 448 512"><path d="M384 32c35.3 0 64 28.7 64 64V416c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V96C0 60.7 28.7 32 64 32H384zM160 144c-13.3 0-24 10.7-24 24s10.7 24 24 24h94.1L119 327c-9.4 9.4-9.4 24.6 0 33.9s24.6 9.4 33.9 0l135-135V328c0 13.3 10.7 24 24 24s24-10.7 24-24V168c-13.3 0-24-10.7-24-24H160z"/></svg>'
+            backgroundTab:
+                '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 448 512"><path d="M384 32c35.3 0 64 28.7 64 64V416c0 35.3-28.7 64-64 64H64c-35.3 0-64-28.7-64-64V96C0 60.7 28.7 32 64 32H384zM160 144c-13.3 0-24 10.7-24 24s10.7 24 24 24h94.1L119 327c-9.4 9.4-9.4 24.6 0 33.9s24.6 9.4 33.9 0l135-135V328c0 13.3 10.7 24 24 24s24-10.7 24-24V168c-13.3 0-24-10.7-24-24H160z"/></svg>'
         };
 
         // Vivaldi icons
-        static VIVALDI_BUTTONS = [{
-            name: 'back',
-            buttonName: 'Back',
-            fallback: '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 448 512"><path d="M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.2 288 416 288c17.7 0 32-14.3 32-32s-14.3-32-32-32l-306.7 0L214.6 118.6c12.5-12.5 12.5-32.8 0-45.3L54.6 192z"/></svg>'
-        }, {
-            name: 'forward',
-            buttonName: 'Forward',
-            fallback: '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 448 512"><path d="M438.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-160-160c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0-45.3L338.8 224 32 224c-17.7 0-32 14.3-32 32s-14.3 32 32 32l306.7 0L233.4 393.4c-12.5 12.5-12.5 32.8 0 45.3l160-160z"/></svg>'
-        }, {
-            name: 'reload',
-            buttonName: 'Reload',
-            fallback: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M125.7 160H176c17.7 0 32 14.3 32 32s-14.3 32-32 32H48c-17.7 0-32-14.3-32-32V64c0-17.7 14.3-32 32-32s32 14.3 32 32v51.2L97.6 97.6c87.5-87.5 229.3-87.5 316.8 0s87.5 229.3 0 316.8s-229.3 87.5-316.8 0c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0c62.5 62.5 163.8 62.5 226.3 0s62.5-163.8 0-226.3s-163.8-62.5-226.3 0L125.7 160z"/></svg>'
-        }];
+        static VIVALDI_BUTTONS = [
+            {
+                name: 'back',
+                buttonName: 'Back',
+                fallback:
+                    '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 448 512"><path d="M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.2 288 416 288c17.7 0 32-14.3 32-32s-14.3-32-32-32l-306.7 0L214.6 118.6c12.5-12.5 12.5-32.8 0-45.3L54.6 192z"/></svg>'
+            },
+            {
+                name: 'forward',
+                buttonName: 'Forward',
+                fallback:
+                    '<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 448 512"><path d="M438.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-160-160c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0-45.3L338.8 224 32 224c-17.7 0-32 14.3-32 32s-14.3 32 32 32l306.7 0L233.4 393.4c-12.5 12.5-12.5 32.8 0 45.3l160-160z"/></svg>'
+            },
+            {
+                name: 'reload',
+                buttonName: 'Reload',
+                fallback:
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path d="M125.7 160H176c17.7 0 32 14.3 32 32s-14.3 32-32 32H48c-17.7 0-32-14.3-32-32V64c0-17.7 14.3-32 32-32s32 14.3 32 32v51.2L97.6 97.6c87.5-87.5 229.3-87.5 316.8 0s87.5 229.3 0 316.8s-229.3 87.5-316.8 0c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0c62.5 62.5 163.8 62.5 226.3 0s62.5-163.8 0-226.3s-163.8-62.5-226.3 0L125.7 160z"/></svg>'
+            }
+        ];
 
         #initialized = false;
         #iconMap = new Map();
-
 
         constructor() {
             this.#initializeStaticIcons();

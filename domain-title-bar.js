@@ -4,7 +4,7 @@
  * Refactored & Fixed for Vivaldi Fullscreen
  */
 (function domain_title_bar() {
-    "use strict";
+    'use strict';
 
     const STYLE = `
         .UrlBar-AddressField:has(.DomainText){
@@ -134,7 +134,7 @@
         }
 
         #createUiObserver() {
-            const uiObserver = new MutationObserver((mutations) => {
+            const uiObserver = new MutationObserver(mutations => {
                 // Check if AddressBar exists but our Button is missing (e.g. after Fullscreen toggle)
                 if (this.#urlBarAddressField && !this.#domainButton) {
                     this.#setupFeatures();
@@ -148,14 +148,18 @@
         }
 
         #addDomainButtonListener() {
-            this.#domainButton.addEventListener('click', async (event) => {
-                event.stopPropagation();
-                const domainInfo = await this.#getDomainInfo();
-                if (!domainInfo.clickable) return;
+            this.#domainButton.addEventListener(
+                'click',
+                async event => {
+                    event.stopPropagation();
+                    const domainInfo = await this.#getDomainInfo();
+                    if (!domainInfo.clickable) return;
 
-                const prefix = this.#calculateDomainPrefix(domainInfo.type);
-                this.#activeWebview.setAttribute('src', prefix + domainInfo.domain);
-            }, true);
+                    const prefix = this.#calculateDomainPrefix(domainInfo.type);
+                    this.#activeWebview.setAttribute('src', prefix + domainInfo.domain);
+                },
+                true
+            );
         }
 
         // builders
@@ -276,8 +280,8 @@
                 try {
                     let extension = await chrome.management.get(url.match(/chrome-extension:\/\/([^/]+)/)[1]);
                     return {type: 'extension', domain: extension.name, clickable: false};
-                } catch(e) {
-                     return {type: 'extension', domain: 'Extension', clickable: false};
+                } catch (e) {
+                    return {type: 'extension', domain: 'Extension', clickable: false};
                 }
             } else {
                 return {type: 'url', domain: url, clickable: true};
