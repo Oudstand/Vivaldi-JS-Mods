@@ -983,7 +983,7 @@
          * @returns {string} - the SVG as a string
          */
         #getVivaldiButton(buttonName, fallbackSVG) {
-            const svg = document.querySelector(`.button-toolbar [name="${buttonName}"] svg`);
+            const svg = document.querySelector(`.button-toolbar [data-name="${buttonName}"] svg`);
             return svg ? svg.cloneNode(true).outerHTML : fallbackSVG;
         }
 
