@@ -3,17 +3,32 @@
  * Forum link: https://forum.vivaldi.net/topic/92501/open-in-dialog-mod?_=1717490394230
  */
 (() => {
-    const ICON_CONFIG = {
+    const UI_CONFIG = {
+            showUrlInput: true // true = shows the URL input in the options container, false = title + buttons only
+        },
+        ICON_CONFIG = {
             linkIcon: '', // if set, an icon shows up after links - example values 'fa-solid fa-up-right-from-square', 'fa-solid fa-circle-info', 'fa-regular fa-square' search for other icons: https://fontawesome.com/search?o=r&ic=free&s=solid&ip=classic
             linkIconInteractionOnHover: true, // if false, you have to click the icon to show the dialog - if true, the dialog shows on mouseenter
             showIconDelay: 250, // set to 0 to disable - delays showing the icon on hovering a link
             showDialogOnHoverDelay: 250 // set to 0 to disable - delays showing the dialog on hovering the linkIcon
         },
         CONTEXT_MENU_CONFIG = {
-            menuPrefix: '[Dialog Tab]',
+            menuPrefix: '[Dialog]',
             linkMenuTitle: 'Link öffnen',
             searchMenuTitle: 'Suche nach "%s"',
             selectSearchMenuTitle: 'Suche mit'
+        },
+        TOOLTIP_CONFIG = {
+            back: 'Zurück',
+            forward: 'Vorwärts',
+            reload: 'Neu laden',
+            readerView: 'Reader View umschalten',
+            newTab: 'In neuem Tab öffnen',
+            backgroundTab: 'Im Hintergrund öffnen'
+        },
+        TIMING_CONFIG = {
+            middleClickDelay: 500,
+            titleFetchDelay: 300
         };
 
     // Wait for the browser to come to a ready state
@@ -25,12 +40,42 @@
         new DialogMod();
     }, 300);
 
+    class DialogLifetime {
+        #controller = new AbortController();
+        #cleanupFns = [];
+        #disposed = false;
+
+        get signal() {
+            return this.#controller.signal;
+        }
+
+        add(cleanupFn) {
+            if (this.#disposed) {
+                cleanupFn();
+                return;
+            }
+
+            this.#cleanupFns.push(cleanupFn);
+        }
+
+        dispose() {
+            if (this.#disposed) return;
+            this.#disposed = true;
+
+            this.#controller.abort();
+
+            for (const cleanupFn of this.#cleanupFns.splice(0)) {
+                cleanupFn();
+            }
+        }
+    }
+
     class DialogMod {
         // Animation constants
         ANIMATION_DURATIONS = {
             CLOSE_TIMEOUT: 800, // Fallback timeout for close animation
             FADE_DELAY: 90, // Delay before starting fade animation
-            PROGRESS_CLEAR: 250, // Progress bar clear timeout
+            OPTIONS_FADE: 300, // Fade timing for swapping title and options
             OPTIONS_HIDE: 1500 // Options container hide delay
         };
 
@@ -53,7 +98,7 @@
                 const webviewValues = Array.from(this.webviews.values());
                 let webviewData = webviewValues.at(-1);
                 if (!webviewData.fromPanel) {
-                    const tabId = Number(document.querySelector('.active.visible.webpageview webview').tab_id);
+                    const tabId = Number(this.getActiveWebview()?.tab_id);
                     webviewData = webviewValues.findLast(_data => _data.tabId === tabId);
                 }
                 webviewData && this.removeDialog(webviewData.webview.id);
@@ -71,7 +116,8 @@
             new WebsiteInjectionUtils(
                 navigationDetails => this.getWebviewConfig(navigationDetails),
                 (url, fromPanel, origin) => this.dialogTab(url, fromPanel, origin), // pass origin through
-                ICON_CONFIG
+                ICON_CONFIG,
+                TIMING_CONFIG
             );
         }
 
@@ -92,6 +138,10 @@
             // follow-up dialog from tab
             const lastWebviewId = document.querySelector('.active.visible.webpageview .dialog-container:last-of-type webview')?.id;
             return {webview: this.webviews.get(lastWebviewId)?.webview, fromPanel: false};
+        }
+
+        getActiveWebview() {
+            return document.querySelector('.active.visible.webpageview webview');
         }
 
         /**
@@ -125,6 +175,20 @@
             }
         }
 
+        cleanupDialog(webviewId) {
+            const data = this.webviews.get(webviewId);
+            if (!data) return;
+
+            data.lifetime?.dispose();
+        }
+
+        removeAssociatedTab(webviewId) {
+            chrome.tabs.query({}, tabs => {
+                const tab = tabs.find(tab => tab.vivExtData && tab.vivExtData.includes(`${webviewId}tabId`));
+                if (tab) chrome.tabs.remove(tab.id);
+            });
+        }
+
         /**
          * Removes the dialog for a given webview
          * @param webviewId The id of the webview
@@ -135,6 +199,7 @@
 
             const container = data.divContainer;
             const dialogTab = container.querySelector('.dialog-tab');
+            const lifetime = data.lifetime;
 
             if (container.dataset.closing === '1') return;
             container.dataset.closing = '1';
@@ -153,36 +218,28 @@
 
                 dialogTab.classList.add('animating-close');
 
+                let removalFinished = false;
                 const finishRemoval = () => {
-                    chrome.tabs.query({}, tabs => {
-                        const tab = tabs.find(tab => tab.vivExtData && tab.vivExtData.includes(`${webviewId}tabId`));
-                        if (tab) chrome.tabs.remove(tab.id);
-                    });
+                    if (removalFinished) return;
+                    removalFinished = true;
 
                     container.classList.remove('is-leave');
+                    this.cleanupDialog(webviewId);
                     data.divContainer.remove();
-
-                    // Clean up event listeners
-                    if (data.tabCloseListener) {
-                        chrome.tabs.onRemoved.removeListener(data.tabCloseListener);
-                    }
-                    if (data.pointerdownListener && data.fromPanel) {
-                        document.body.removeEventListener('pointerdown', data.pointerdownListener);
-                    }
 
                     this.webviews.delete(webviewId);
                 };
 
                 const onCloseEnd = e => {
                     if (e.animationName === 'dialog-tab-close-anchored') {
-                        dialogTab.removeEventListener('animationend', onCloseEnd);
                         finishRemoval();
                     }
                 };
-                dialogTab.addEventListener('animationend', onCloseEnd);
+                dialogTab.addEventListener('animationend', onCloseEnd, {signal: lifetime.signal});
 
                 // Fallback in case animationend doesn't fire
-                setTimeout(finishRemoval, this.ANIMATION_DURATIONS.CLOSE_TIMEOUT);
+                const closeFallback = setTimeout(finishRemoval, this.ANIMATION_DURATIONS.CLOSE_TIMEOUT);
+                lifetime.add(() => clearTimeout(closeFallback));
             });
         }
 
@@ -212,32 +269,37 @@
                 webview = document.createElement('webview'),
                 webviewId = `dialog-${this.getWebviewId()}`,
                 progressBar = new ProgressBar(webviewId),
+                lifetime = new DialogLifetime(),
                 optionsContainer = document.createElement('div');
 
             if (fromPanel === undefined && this.webviews.size !== 0) {
                 fromPanel = Array.from(this.webviews.values()).at(-1).fromPanel;
             }
 
-            const tabId = !fromPanel ? Number(document.querySelector('.active.visible.webpageview webview').tab_id) : null;
+            const activeWebview = this.getActiveWebview();
+            const tabId = !fromPanel && activeWebview ? Number(activeWebview.tab_id) : null;
 
             this.webviews.set(webviewId, {
                 divContainer: dialogContainer,
                 webview: webview,
                 fromPanel: fromPanel,
                 tabId: tabId,
-                pointerdownListener: null // Will be set later if fromPanel is true
+                progressBar,
+                lifetime
             });
+            lifetime.add(() => progressBar.destroy());
+            lifetime.add(() => this.removeAssociatedTab(webviewId));
 
             // remove dialogs when tab is closed without closing dialogs
             if (!fromPanel) {
                 const clearWebviews = closedTabId => {
                     if (tabId === closedTabId) {
                         this.webviews.forEach((view, key) => view.tabCloseListener === clearWebviews && this.removeDialog(key));
-                        chrome.tabs.onRemoved.removeListener(clearWebviews);
                     }
                 };
                 this.webviews.get(webviewId).tabCloseListener = clearWebviews;
                 chrome.tabs.onRemoved.addListener(clearWebviews);
+                lifetime.add(() => chrome.tabs.onRemoved.removeListener(clearWebviews));
             }
 
             //#region dialogTab properties
@@ -250,19 +312,65 @@
 
             //#region optionsContainer properties
             optionsContainer.setAttribute('class', 'options-container');
-            optionsContainer.innerHTML = this.iconUtils.ellipsis;
+            optionsContainer.textContent = linkUrl;
 
-            let timeout;
-            optionsContainer.addEventListener('mouseover', () => {
-                if (optionsContainer.children.length === 1) {
-                    optionsContainer.innerHTML = '';
-                    this.showWebviewOptions(webviewId, optionsContainer);
-                }
-                clearTimeout(timeout);
+            let pageTitle = linkUrl,
+                showingOptions = false,
+                hideOptionsTimeout,
+                fadeTimeout;
+
+            const setTitleText = title => {
+                    pageTitle = title || webview.src || linkUrl;
+                    if (!showingOptions) optionsContainer.textContent = pageTitle;
+                },
+                showOptions = () => {
+                    clearTimeout(hideOptionsTimeout);
+                    clearTimeout(fadeTimeout);
+
+                    if (showingOptions) return;
+
+                    optionsContainer.classList.add('fade-out');
+                    fadeTimeout = setTimeout(() => {
+                        if (lifetime.signal.aborted) return;
+                        optionsContainer.innerHTML = '';
+                        this.showWebviewOptions(webviewId, optionsContainer);
+                        optionsContainer.classList.add('showing-options');
+                        optionsContainer.classList.remove('fade-out');
+                        showingOptions = true;
+                    }, this.ANIMATION_DURATIONS.OPTIONS_FADE);
+                },
+                showTitle = () => {
+                    clearTimeout(hideOptionsTimeout);
+                    clearTimeout(fadeTimeout);
+
+                    if (!showingOptions) {
+                        optionsContainer.textContent = pageTitle;
+                        optionsContainer.classList.remove('showing-options');
+                        optionsContainer.classList.remove('fade-out');
+                        return;
+                    }
+
+                    hideOptionsTimeout = setTimeout(() => {
+                        if (!showingOptions) return;
+
+                        optionsContainer.classList.add('fade-out');
+                        fadeTimeout = setTimeout(() => {
+                            if (lifetime.signal.aborted) return;
+                            optionsContainer.textContent = pageTitle;
+                            optionsContainer.classList.remove('showing-options');
+                            optionsContainer.classList.remove('fade-out');
+                            showingOptions = false;
+                        }, this.ANIMATION_DURATIONS.OPTIONS_FADE);
+                    }, this.ANIMATION_DURATIONS.OPTIONS_HIDE);
+                };
+
+            lifetime.add(() => {
+                clearTimeout(hideOptionsTimeout);
+                clearTimeout(fadeTimeout);
             });
-            optionsContainer.addEventListener('mouseleave', () => {
-                timeout = setTimeout(() => (optionsContainer.innerHTML = this.iconUtils.ellipsis), this.ANIMATION_DURATIONS.OPTIONS_HIDE);
-            });
+
+            optionsContainer.addEventListener('mouseenter', showOptions, {signal: lifetime.signal});
+            optionsContainer.addEventListener('mouseleave', showTitle, {signal: lifetime.signal});
             //#endregion
 
             //#region webview properties
@@ -270,17 +378,45 @@
             webview.tab_id = `${webviewId}tabId`;
             webview.setAttribute('src', linkUrl);
 
-            webview.addEventListener('loadstart', () => {
-                webview.style.backgroundColor = 'var(--colorBorder)';
-                progressBar.start();
+            let titleFetchTimeout;
+            lifetime.add(() => clearTimeout(titleFetchTimeout));
 
-                const input = document.getElementById(`input-${webview.id}`);
-                if (input !== null) {
-                    input.value = webview.src;
-                }
-            });
-            webview.addEventListener('loadstop', () => progressBar.clear(true));
-            fromPanel && webview.addEventListener('mousedown', event => event.stopPropagation());
+            webview.addEventListener(
+                'loadstart',
+                () => {
+                    webview.style.backgroundColor = 'var(--colorBorder)';
+                    progressBar.start();
+                    setTitleText(webview.src || linkUrl);
+
+                    const input = document.getElementById(`input-${webview.id}`);
+                    if (input !== null) {
+                        input.value = webview.src;
+                    }
+                },
+                {signal: lifetime.signal}
+            );
+            webview.addEventListener(
+                'loadcommit',
+                () => {
+                    setTitleText(webview.src || linkUrl);
+                },
+                {signal: lifetime.signal}
+            );
+            webview.addEventListener(
+                'loadstop',
+                () => {
+                    progressBar.clear(true);
+
+                    const expectedSrc = webview.src;
+                    clearTimeout(titleFetchTimeout);
+                    titleFetchTimeout = setTimeout(() => {
+                        if (lifetime.signal.aborted) return;
+                        this.fetchWebviewTitle(webview, expectedSrc, setTitleText);
+                    }, TIMING_CONFIG.titleFetchDelay);
+                },
+                {signal: lifetime.signal}
+            );
+            fromPanel && webview.addEventListener('mousedown', event => event.stopPropagation(), {signal: lifetime.signal});
             //#endregion
 
             //#region dialogContainer properties
@@ -324,16 +460,18 @@
             };
 
             if (fromPanel) {
-                document.body.addEventListener('pointerdown', stopEvent);
-                // Store listener reference for cleanup
-                this.webviews.get(webviewId).pointerdownListener = stopEvent;
+                document.body.addEventListener('pointerdown', stopEvent, {signal: lifetime.signal});
             }
 
-            dialogContainer.addEventListener('click', event => {
-                if (event.target === dialogContainer) {
-                    this.removeDialog(webviewId);
-                }
-            });
+            dialogContainer.addEventListener(
+                'click',
+                event => {
+                    if (event.target === dialogContainer) {
+                        this.removeDialog(webviewId);
+                    }
+                },
+                {signal: lifetime.signal}
+            );
 
             //#endregion
 
@@ -347,6 +485,7 @@
 
             // Two-frame start: measure anchored start, then overlay, then animate with a tiny delay
             requestAnimationFrame(() => {
+                if (lifetime.signal.aborted) return;
                 const t = this.setAnchoredTransformVars(dialogTab, pointerX, pointerY); // sets --tx0/--ty0/--s0 and returns numbers
                 // show anchored start inline immediately
                 dialogTab.style.transform = `translate(${t.t0x}px, ${t.t0y}px) scale(${t.s0})`;
@@ -355,8 +494,10 @@
                 dialogTab.getBoundingClientRect();
 
                 requestAnimationFrame(() => {
+                    if (lifetime.signal.aborted) return;
                     dialogContainer.classList.add('is-open');
-                    setTimeout(() => {
+                    const openDelay = setTimeout(() => {
+                        if (lifetime.signal.aborted) return;
                         dialogTab.classList.add('animating-open');
 
                         const onOpenEnd = e => {
@@ -365,11 +506,11 @@
                                 // cleanup inline styles
                                 dialogTab.style.removeProperty('transform');
                                 dialogTab.style.removeProperty('opacity');
-                                dialogTab.removeEventListener('animationend', onOpenEnd);
                             }
                         };
-                        dialogTab.addEventListener('animationend', onOpenEnd);
+                        dialogTab.addEventListener('animationend', onOpenEnd, {signal: lifetime.signal});
                     }, this.ANIMATION_DURATIONS.FADE_DELAY);
+                    lifetime.add(() => clearTimeout(openDelay));
                 });
             });
         }
@@ -393,6 +534,29 @@
             return {t0x, t0y, s0};
         }
 
+        fetchWebviewTitle(webview, expectedSrc, setTitleText) {
+            try {
+                let title = '';
+                if (webview.getTitle) {
+                    title = webview.getTitle();
+                }
+
+                if (title) {
+                    if (webview.src === expectedSrc) setTitleText(title);
+                    return;
+                }
+
+                webview.executeScript({code: 'document.title'}, results => {
+                    if (chrome.runtime.lastError || webview.src !== expectedSrc) return;
+
+                    const resolvedTitle = results?.[0];
+                    if (resolvedTitle) setTitleText(resolvedTitle);
+                });
+            } catch (error) {
+                console.debug('Dialog mod: Failed to fetch page title:', error);
+            }
+        }
+
         /**
          * Displays open in tab buttons and current url in input element
          * @param {string} webviewId is the id of the webview
@@ -401,61 +565,56 @@
         showWebviewOptions(webviewId, thisElement) {
             let inputId = `input-${webviewId}`,
                 data = this.webviews.get(webviewId),
-                webview = data ? data.webview : undefined;
-            if (webview && document.getElementById(inputId) === null) {
-                const input = document.createElement('input', 'text'),
-                    // Allowed URL schemes for webview navigation
-                    VALID_URL_PREFIXES = ['http://', 'https://', 'file://', 'vivaldi://', 'chrome://', 'chrome-extension://', 'data:', 'blob:'],
-                    // Blocked schemes that could be dangerous
-                    BLOCKED_SCHEMES = ['javascript:', 'vbscript:'],
-                    isValidUrl = url => {
-                        if (!url || typeof url !== 'string') return false;
-                        const trimmedUrl = url.trim();
+                webview = data ? data.webview : undefined,
+                signal = data?.lifetime?.signal;
+            if (webview) {
+                let input = null;
 
-                        // Check for blocked schemes first
-                        if (BLOCKED_SCHEMES.some(scheme => trimmedUrl.toLowerCase().startsWith(scheme))) {
-                            return false;
-                        }
+                if (UI_CONFIG.showUrlInput) {
+                    input = document.createElement('input');
+                    input.value = webview.src;
+                    input.id = inputId;
+                    input.setAttribute('class', 'dialog-input');
 
-                        // Allow about: pages
-                        if (trimmedUrl.startsWith('about:')) return true;
-
-                        // Check valid prefixes
-                        return VALID_URL_PREFIXES.some(prefix => trimmedUrl.startsWith(prefix));
-                    };
-
-                input.value = webview.src;
-                input.id = inputId;
-                input.setAttribute('class', 'dialog-input');
-
-                input.addEventListener('keydown', async event => {
-                    if (event.key === 'Enter') {
-                        let value = input.value;
-                        if (isValidUrl(value)) {
-                            webview.src = value;
-                        } else {
-                            const searchRequest = await vivaldi.searchEngines.getSearchRequest(this.searchEngineUtils.defaultSearchId, value);
-                            webview.src = searchRequest.url;
-                        }
-                    }
-                });
+                    input.addEventListener(
+                        'keydown',
+                        async event => {
+                            if (event.key === 'Enter') {
+                                const value = input.value;
+                                webview.src = await UrlUtils.normalizeOrSearch(value, this.searchEngineUtils);
+                            }
+                        },
+                        {signal}
+                    );
+                }
 
                 const fragment = document.createDocumentFragment(),
                     buttons = [
-                        {content: this.iconUtils.back, action: () => webview.back()},
-                        {content: this.iconUtils.forward, action: () => webview.forward()},
-                        {content: this.iconUtils.reload, action: () => webview.reload()},
+                        {content: this.iconUtils.back, action: () => webview.back(), tooltip: TOOLTIP_CONFIG.back},
+                        {content: this.iconUtils.forward, action: () => webview.forward(), tooltip: TOOLTIP_CONFIG.forward},
+                        {content: this.iconUtils.reload, action: () => webview.reload(), tooltip: TOOLTIP_CONFIG.reload},
                         {
                             content: this.iconUtils.readerView,
                             action: this.showReaderView.bind(this, webview),
-                            cls: 'reader-view-toggle'
+                            cls: 'reader-view-toggle',
+                            tooltip: TOOLTIP_CONFIG.readerView
                         },
-                        {content: this.iconUtils.newTab, action: this.openNewTab.bind(this, inputId, true)},
-                        {content: this.iconUtils.backgroundTab, action: this.openNewTab.bind(this, inputId, false)}
+                        {
+                            content: this.iconUtils.newTab,
+                            action: () => (UI_CONFIG.showUrlInput ? this.openNewTab(inputId, true) : this.openNewTabFromWebview(webview, true)),
+                            tooltip: TOOLTIP_CONFIG.newTab
+                        },
+                        {
+                            content: this.iconUtils.backgroundTab,
+                            action: () => (UI_CONFIG.showUrlInput ? this.openNewTab(inputId, false) : this.openNewTabFromWebview(webview, false)),
+                            tooltip: TOOLTIP_CONFIG.backgroundTab
+                        }
                     ];
 
-                buttons.forEach(button => fragment.appendChild(this.createOptionsButton(button.content, button.action, button.cls || '')));
-                fragment.appendChild(input);
+                buttons.forEach(button =>
+                    fragment.appendChild(this.createOptionsButton(button.content, button.action, button.cls || '', button.tooltip, signal))
+                );
+                if (input) fragment.appendChild(input);
 
                 thisElement.append(fragment);
             }
@@ -466,11 +625,14 @@
          * @param {Node | string} content the content of the button to display
          * @param {Function} clickListenerCallback the click listeners callback function
          * @param {string} cls optional additional class for the button
+         * @param {string} tooltip optional tooltip text
+         * @param {AbortSignal} signal optional lifetime signal
          */
-        createOptionsButton(content, clickListenerCallback, cls = '') {
+        createOptionsButton(content, clickListenerCallback, cls = '', tooltip = '', signal = undefined) {
             const button = document.createElement('button');
             button.setAttribute('class', `options-button ${cls}`.trim());
-            button.addEventListener('click', clickListenerCallback);
+            if (tooltip) button.dataset.tooltip = tooltip;
+            button.addEventListener('click', clickListenerCallback, {signal});
 
             if (typeof content === 'string') {
                 button.innerHTML = content;
@@ -512,15 +674,44 @@
          * @param {string} inputId is the id of the input containing current url
          * @param {boolean} active indicates whether the tab is active or not (background tab)
          */
-        openNewTab(inputId, active) {
+        async openNewTab(inputId, active) {
             const url = document.getElementById(inputId).value;
-            chrome.tabs.create({url: url, active: active});
+            chrome.tabs.create({url: await UrlUtils.normalizeOrSearch(url, this.searchEngineUtils), active: active});
+        }
+
+        openNewTabFromWebview(webview, active) {
+            chrome.tabs.create({url: webview.src, active: active});
+        }
+    }
+
+    class UrlUtils {
+        static VALID_URL_PREFIXES = ['http://', 'https://', 'file://', 'vivaldi://', 'chrome://', 'chrome-extension://', 'data:', 'blob:'];
+        static BLOCKED_SCHEMES = ['javascript:', 'vbscript:'];
+
+        static isValid(url) {
+            if (!url || typeof url !== 'string') return false;
+
+            const trimmedUrl = url.trim().toLowerCase();
+            if (this.BLOCKED_SCHEMES.some(scheme => trimmedUrl.startsWith(scheme))) return false;
+            if (trimmedUrl.startsWith('about:')) return true;
+
+            return this.VALID_URL_PREFIXES.some(prefix => trimmedUrl.startsWith(prefix));
+        }
+
+        static async normalizeOrSearch(input, searchEngineUtils) {
+            if (this.isValid(input)) return input.trim();
+
+            const searchRequest = await vivaldi.searchEngines.getSearchRequest(searchEngineUtils.defaultSearchId, input);
+            return searchRequest.url;
         }
     }
 
     class WebsiteInjectionUtils {
-        constructor(getWebviewConfig, openDialog, iconConfig) {
-            this.iconConfig = JSON.stringify(iconConfig);
+        constructor(getWebviewConfig, openDialog, iconConfig, timingConfig) {
+            this.linkInteractionConfig = JSON.stringify({
+                icon: iconConfig,
+                timing: timingConfig
+            });
 
             // inject detection of click observers
             chrome.webNavigation.onCompleted.addListener(navigationDetails => {
@@ -540,7 +731,7 @@
             const handler = WebsiteLinkInteractionHandler.toString(),
                 instantiationCode = `
                 if (!this.dialogEventListenerSet) {
-                    new (${handler})(${fromPanel}, ${this.iconConfig});
+                    new (${handler})(${fromPanel}, ${this.linkInteractionConfig});
                     this.dialogEventListenerSet = true;
                 }
             `;
@@ -562,7 +753,10 @@
         constructor(fromPanel, config) {
             this.fromPanel = fromPanel;
             this.config = config;
+            this.iconConfig = config.icon;
+            this.timingConfig = config.timing;
             this.icon = null;
+            this.boundHideIcon = this.#hideLinkIcon.bind(this);
             this.timers = {showIcon: null, showDialog: null, hideIcon: null};
 
             this.#initialize();
@@ -574,7 +768,7 @@
         #initialize() {
             this.#setupMouseHandling();
 
-            if (this.config.linkIcon) {
+            if (this.iconConfig.linkIcon) {
                 this.#setupIconHandling();
             }
         }
@@ -598,7 +792,7 @@
                     const href = link.href;
                     holdTimerForMiddleClick = setTimeout(() => {
                         this.#sendDialogMessage(href, px, py);
-                    }, 500);
+                    }, this.timingConfig.middleClickDelay);
                 }
             });
 
@@ -631,14 +825,14 @@
                     this.icon.dataset.targetUrl = link.href;
                     this.currentLinkEl = link;
 
-                    link.addEventListener('mouseleave', this.#hideLinkIcon.bind(this));
-                }, this.config.showIconDelay)
+                    link.addEventListener('mouseleave', this.boundHideIcon);
+                }, this.iconConfig.showIconDelay)
             );
         }
 
         #createIcon() {
             const icon = document.createElement('div');
-            icon.className = `link-icon ${this.config.linkIcon}`;
+            icon.className = `link-icon ${this.iconConfig.linkIcon}`;
             icon.style.display = 'none';
 
             const getLinkCenter = () => {
@@ -650,12 +844,12 @@
                 return {x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2)};
             };
 
-            if (this.config.linkIconInteractionOnHover) {
+            if (this.iconConfig.linkIconInteractionOnHover) {
                 icon.addEventListener('mouseenter', () => {
                     this.timers.showDialog = setTimeout(() => {
                         const {x, y} = getLinkCenter();
                         this.#sendDialogMessage(this.icon.dataset.targetUrl, x, y);
-                    }, this.config.showDialogOnHoverDelay);
+                    }, this.iconConfig.showDialogOnHoverDelay);
                 });
                 icon.addEventListener('mouseleave', () => clearTimeout(this.timers.showDialog));
             } else {
@@ -664,7 +858,7 @@
                     this.#sendDialogMessage(this.icon.dataset.targetUrl, x, y);
                 });
                 icon.addEventListener('mouseenter', () => clearTimeout(this.timers.hideIcon));
-                icon.addEventListener('mouseleave', this.#hideLinkIcon.bind(this));
+                icon.addEventListener('mouseleave', this.boundHideIcon);
             }
 
             this.icon = icon;
@@ -677,7 +871,7 @@
                     this.icon.style.display = 'none';
                     clearTimeout(this.timers.showIcon);
                 },
-                this.config.linkIconInteractionOnHover ? 300 : 600
+                this.iconConfig.linkIconInteractionOnHover ? 300 : 600
             );
         }
 
@@ -784,17 +978,17 @@
         #createContextMenuOption() {
             chrome.contextMenus.create({
                 id: this.LINK_ID,
-                title: `${this.menuPrefix} ${this.linkMenuTitle}`,
+                title: this.#formatMenuTitle(this.linkMenuTitle),
                 contexts: ['link']
             });
             chrome.contextMenus.create({
                 id: this.SEARCH_ID,
-                title: `${this.menuPrefix} ${this.searchMenuTitle}`,
+                title: this.#formatMenuTitle(this.searchMenuTitle),
                 contexts: ['selection']
             });
             chrome.contextMenus.create({
                 id: this.SELECT_SEARCH_ID,
-                title: `${this.menuPrefix} ${this.selectSearchMenuTitle}`,
+                title: this.#formatMenuTitle(this.selectSearchMenuTitle),
                 contexts: ['selection']
             });
 
@@ -811,6 +1005,10 @@
                     this.searchCallback(engineId, selectionText);
                 }
             });
+        }
+
+        #formatMenuTitle(title) {
+            return this.menuPrefix ? `${this.menuPrefix} ${title}` : title;
         }
 
         /**
@@ -857,11 +1055,13 @@
 
     class ProgressBar {
         static CLEAR_DELAY = 250; // Delay before hiding progress bar after completion
+        static EASING = 0.08;
 
         constructor(webviewId) {
             this.webviewId = webviewId;
             this.progress = 0;
-            this.interval = null;
+            this.animationFrame = null;
+            this.clearTimeout = null;
             this.element = this.#createProgressBar(webviewId);
         }
 
@@ -876,36 +1076,47 @@
             this.element.style.visibility = 'visible';
             this.element.classList.remove('is-complete');
             this.progress = 0;
+            this.element.style.width = '0%';
 
-            if (!this.interval) {
-                this.interval = setInterval(() => {
-                    if (this.progress >= 100) {
-                        this.clear();
-                    } else {
-                        this.progress++;
-                        this.element.style.width = this.progress + '%';
-                    }
-                }, 10);
-            }
+            this.#animateTo(85);
+        }
+
+        #animateTo(target) {
+            cancelAnimationFrame(this.animationFrame);
+
+            const step = () => {
+                this.progress += (target - this.progress) * ProgressBar.EASING;
+                this.element.style.width = `${this.progress.toFixed(2)}%`;
+
+                if (this.progress < target - 0.5) {
+                    this.animationFrame = requestAnimationFrame(step);
+                }
+            };
+
+            this.animationFrame = requestAnimationFrame(step);
         }
 
         clear(loadStop = false) {
+            cancelAnimationFrame(this.animationFrame);
+            clearTimeout(this.clearTimeout);
             this.element.classList.add('is-complete');
-
-            if (this.interval) {
-                clearInterval(this.interval);
-                this.interval = null;
-            }
 
             if (loadStop) {
                 this.element.style.width = '100%';
 
-                setTimeout(() => {
+                this.clearTimeout = setTimeout(() => {
                     this.progress = 0;
                     this.element.style.visibility = 'hidden';
-                    this.element.style.width = this.progress + '%';
+                    this.element.style.width = '0%';
                 }, ProgressBar.CLEAR_DELAY);
             }
+        }
+
+        destroy() {
+            cancelAnimationFrame(this.animationFrame);
+            clearTimeout(this.clearTimeout);
+            this.animationFrame = null;
+            this.clearTimeout = null;
         }
     }
 
