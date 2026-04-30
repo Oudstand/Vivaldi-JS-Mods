@@ -129,7 +129,7 @@
 
             // first dialog from tab or webpanel
             let webview = document.querySelector(`webview[tab_id="${navigationDetails.tabId}"]`);
-            if (webview) return {webview, fromPanel: webview.name === 'vivaldi-webpanel'};
+            if (webview) return {webview, fromPanel: this.webviews.get(webview.id)?.fromPanel ?? webview.name === 'vivaldi-webpanel'};
 
             // follow-up dialog from the webpanel
             webview = Array.from(this.webviews.values()).find(view => view.fromPanel)?.webview;
@@ -183,10 +183,10 @@
         }
 
         removeAssociatedTab(webviewId) {
-            chrome.tabs.query({}, tabs => {
-                const tab = tabs.find(tab => tab.vivExtData && tab.vivExtData.includes(`${webviewId}tabId`));
-                if (tab) chrome.tabs.remove(tab.id);
-            });
+            const tabId = this.webviews.get(webviewId)?.relatedTabId;
+            if (!tabId) return;
+
+            chrome.tabs.remove(tabId);
         }
 
         /**
@@ -375,8 +375,6 @@
 
             //#region webview properties
             webview.id = webviewId;
-            webview.tab_id = `${webviewId}tabId`;
-            webview.setAttribute('src', linkUrl);
 
             let titleFetchTimeout;
             lifetime.add(() => clearTimeout(titleFetchTimeout));
@@ -481,37 +479,89 @@
 
             dialogContainer.appendChild(dialogTab);
 
-            (fromPanel ? document.querySelector('#browser') : document.querySelector('.active.visible.webpageview')).appendChild(dialogContainer);
+            this.prepareDialogWebview(webview, webviewId, linkUrl, lifetime).then(success => {
+                if (lifetime.signal.aborted || !success) {
+                    this.cleanupDialog(webviewId);
+                    this.webviews.delete(webviewId);
+                    return;
+                }
 
-            // Two-frame start: measure anchored start, then overlay, then animate with a tiny delay
-            requestAnimationFrame(() => {
-                if (lifetime.signal.aborted) return;
-                const t = this.setAnchoredTransformVars(dialogTab, pointerX, pointerY); // sets --tx0/--ty0/--s0 and returns numbers
-                // show anchored start inline immediately
-                dialogTab.style.transform = `translate(${t.t0x}px, ${t.t0y}px) scale(${t.s0})`;
-                dialogTab.style.opacity = '0';
-                dialogTab.style.visibility = 'visible';
-                dialogTab.getBoundingClientRect();
+                (fromPanel ? document.querySelector('#browser') : document.querySelector('.active.visible.webpageview')).appendChild(dialogContainer);
 
                 requestAnimationFrame(() => {
                     if (lifetime.signal.aborted) return;
-                    dialogContainer.classList.add('is-open');
-                    const openDelay = setTimeout(() => {
-                        if (lifetime.signal.aborted) return;
-                        dialogTab.classList.add('animating-open');
+                    const t = this.setAnchoredTransformVars(dialogTab, pointerX, pointerY); // sets --tx0/--ty0/--s0 and returns numbers
+                    // show anchored start inline immediately
+                    dialogTab.style.transform = `translate(${t.t0x}px, ${t.t0y}px) scale(${t.s0})`;
+                    dialogTab.style.opacity = '0';
+                    dialogTab.style.visibility = 'visible';
+                    dialogTab.getBoundingClientRect();
 
-                        const onOpenEnd = e => {
-                            if (e.animationName === 'dialog-tab-open-anchored') {
-                                dialogTab.classList.remove('animating-open');
-                                // cleanup inline styles
-                                dialogTab.style.removeProperty('transform');
-                                dialogTab.style.removeProperty('opacity');
-                            }
-                        };
-                        dialogTab.addEventListener('animationend', onOpenEnd, {signal: lifetime.signal});
-                    }, this.ANIMATION_DURATIONS.FADE_DELAY);
-                    lifetime.add(() => clearTimeout(openDelay));
+                    requestAnimationFrame(() => {
+                        if (lifetime.signal.aborted) return;
+                        dialogContainer.classList.add('is-open');
+                        const openDelay = setTimeout(() => {
+                            if (lifetime.signal.aborted) return;
+                            dialogTab.classList.add('animating-open');
+
+                            const onOpenEnd = e => {
+                                if (e.animationName === 'dialog-tab-open-anchored') {
+                                    dialogTab.classList.remove('animating-open');
+                                    // cleanup inline styles
+                                    dialogTab.style.removeProperty('transform');
+                                    dialogTab.style.removeProperty('opacity');
+                                }
+                            };
+                            dialogTab.addEventListener('animationend', onOpenEnd, {signal: lifetime.signal});
+                        }, this.ANIMATION_DURATIONS.FADE_DELAY);
+                        lifetime.add(() => clearTimeout(openDelay));
+                    });
                 });
+            });
+        }
+
+        prepareDialogWebview(webview, webviewId, linkUrl, lifetime) {
+            return this.createRelatedTab(webviewId, linkUrl, lifetime).then(tab => {
+                if (!tab?.id) return false;
+
+                const tabId = String(tab.id);
+                this.webviews.get(webviewId).relatedTabId = tab.id;
+                webview.tab_id = tabId;
+                webview.setAttribute('tab_id', tabId);
+                webview.setAttribute('parent_tab_id', '0');
+                webview.setAttribute('name', 'vivaldi-dialog');
+                return true;
+            });
+        }
+
+        createRelatedTab(webviewId, linkUrl, lifetime) {
+            const panelId = `${webviewId}tabId`;
+            return new Promise(resolve => {
+                // Vivaldi web panels use this related-tab pattern. It keeps the
+                // page out of the tab bar while still giving extensions a real tab.
+                chrome.tabs.create(
+                    {
+                        url: linkUrl,
+                        active: false,
+                        windowId: vivaldiWindowId,
+                        vivExtData: JSON.stringify({panelId})
+                    },
+                    tab => {
+                        if (chrome.runtime.lastError || !tab?.id) {
+                            console.debug('Dialog mod: Failed to create related tab:', chrome.runtime.lastError);
+                            resolve(null);
+                            return;
+                        }
+
+                        if (lifetime.signal.aborted) {
+                            chrome.tabs.remove(tab.id);
+                            resolve(null);
+                            return;
+                        }
+
+                        resolve(tab);
+                    }
+                );
             });
         }
 
@@ -805,13 +855,15 @@
             this.#createIcon();
             this.#createIconStyle();
 
-            document.addEventListener(
-                'mouseover',
-                this.debounce(event => {
-                    const link = this.#getLinkElement(event);
-                    if (!link) return;
+            document.addEventListener('mouseover', event => {
+                const link = this.#getLinkElement(event);
+                if (!link) return;
 
-                    clearTimeout(this.timers.hideIcon);
+                clearTimeout(this.timers.showIcon);
+                clearTimeout(this.timers.hideIcon);
+
+                this.timers.showIcon = setTimeout(() => {
+                    if (!link.isConnected) return;
 
                     requestAnimationFrame(() => {
                         const rect = link.getBoundingClientRect();
@@ -826,8 +878,8 @@
                     this.currentLinkEl = link;
 
                     link.addEventListener('mouseleave', this.boundHideIcon);
-                }, this.iconConfig.showIconDelay)
-            );
+                }, this.iconConfig.showIconDelay);
+            });
         }
 
         #createIcon() {
@@ -846,12 +898,16 @@
 
             if (this.iconConfig.linkIconInteractionOnHover) {
                 icon.addEventListener('mouseenter', () => {
+                    clearTimeout(this.timers.hideIcon);
                     this.timers.showDialog = setTimeout(() => {
                         const {x, y} = getLinkCenter();
                         this.#sendDialogMessage(this.icon.dataset.targetUrl, x, y);
                     }, this.iconConfig.showDialogOnHoverDelay);
                 });
-                icon.addEventListener('mouseleave', () => clearTimeout(this.timers.showDialog));
+                icon.addEventListener('mouseleave', () => {
+                    clearTimeout(this.timers.showDialog);
+                    this.#hideLinkIcon();
+                });
             } else {
                 icon.addEventListener('click', () => {
                     const {x, y} = getLinkCenter();
@@ -866,10 +922,10 @@
         }
 
         #hideLinkIcon() {
+            clearTimeout(this.timers.showIcon);
             this.timers.hideIcon = setTimeout(
                 () => {
                     this.icon.style.display = 'none';
-                    clearTimeout(this.timers.showIcon);
                 },
                 this.iconConfig.linkIconInteractionOnHover ? 300 : 600
             );
@@ -907,14 +963,6 @@
                 }
             `;
             document.head.appendChild(style);
-        }
-
-        debounce(fn, delay) {
-            let timer = null;
-            return (...args) => {
-                clearTimeout(timer);
-                timer = setTimeout(fn.bind(this, ...args), delay);
-            };
         }
     }
 
