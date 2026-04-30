@@ -312,16 +312,23 @@
 
             //#region optionsContainer properties
             optionsContainer.setAttribute('class', 'options-container');
-            optionsContainer.textContent = linkUrl;
 
-            let pageTitle = linkUrl,
+            const titleElement = document.createElement('span');
+            titleElement.setAttribute('class', 'options-title');
+
+            let pageTitle = UrlUtils.toDisplayText(linkUrl),
                 showingOptions = false,
                 hideOptionsTimeout,
                 fadeTimeout;
 
-            const setTitleText = title => {
-                    pageTitle = title || webview.src || linkUrl;
-                    if (!showingOptions) optionsContainer.textContent = pageTitle;
+            const renderTitle = () => {
+                    titleElement.textContent = pageTitle;
+                    titleElement.title = pageTitle;
+                    optionsContainer.replaceChildren(titleElement);
+                },
+                setTitleText = title => {
+                    pageTitle = UrlUtils.toDisplayText(title || webview.src || linkUrl);
+                    if (!showingOptions) renderTitle();
                 },
                 showOptions = () => {
                     clearTimeout(hideOptionsTimeout);
@@ -332,7 +339,7 @@
                     optionsContainer.classList.add('fade-out');
                     fadeTimeout = setTimeout(() => {
                         if (lifetime.signal.aborted) return;
-                        optionsContainer.innerHTML = '';
+                        optionsContainer.replaceChildren();
                         this.showWebviewOptions(webviewId, optionsContainer);
                         optionsContainer.classList.add('showing-options');
                         optionsContainer.classList.remove('fade-out');
@@ -344,7 +351,7 @@
                     clearTimeout(fadeTimeout);
 
                     if (!showingOptions) {
-                        optionsContainer.textContent = pageTitle;
+                        renderTitle();
                         optionsContainer.classList.remove('showing-options');
                         optionsContainer.classList.remove('fade-out');
                         return;
@@ -356,13 +363,15 @@
                         optionsContainer.classList.add('fade-out');
                         fadeTimeout = setTimeout(() => {
                             if (lifetime.signal.aborted) return;
-                            optionsContainer.textContent = pageTitle;
+                            renderTitle();
                             optionsContainer.classList.remove('showing-options');
                             optionsContainer.classList.remove('fade-out');
                             showingOptions = false;
                         }, this.ANIMATION_DURATIONS.OPTIONS_FADE);
                     }, this.ANIMATION_DURATIONS.OPTIONS_HIDE);
                 };
+
+            renderTitle();
 
             lifetime.add(() => {
                 clearTimeout(hideOptionsTimeout);
@@ -753,6 +762,19 @@
 
             const searchRequest = await vivaldi.searchEngines.getSearchRequest(searchEngineUtils.defaultSearchId, input);
             return searchRequest.url;
+        }
+
+        static toDisplayText(value) {
+            if (!value || typeof value !== 'string') return '';
+
+            try {
+                const url = new URL(value);
+                if (!['http:', 'https:'].includes(url.protocol)) return value;
+
+                return url.origin;
+            } catch (error) {
+                return value;
+            }
         }
     }
 
