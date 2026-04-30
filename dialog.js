@@ -113,23 +113,33 @@
             // Setup keyboard shortcuts
             vivaldi.tabsPrivate.onKeyboardShortcut.addListener(this.keyCombo.bind(this));
 
-            new WebsiteInjectionUtils(
-                navigationDetails => this.getWebviewConfig(navigationDetails),
-                (url, fromPanel, origin) => this.dialogTab(url, fromPanel, origin), // pass origin through
-                ICON_CONFIG,
+            new WebviewLinkInteractionUtils(
+                webview => this.getWebviewFromPanel(webview),
+                (url, fromPanel, origin) => this.dialogTab(url, fromPanel, origin),
                 TIMING_CONFIG
             );
+
+            if (ICON_CONFIG.linkIcon) {
+                new WebsiteInjectionUtils(
+                    navigationDetails => this.getWebviewConfig(navigationDetails),
+                    (url, fromPanel, origin) => this.dialogTab(url, fromPanel, origin),
+                    ICON_CONFIG,
+                    TIMING_CONFIG
+                );
+            }
         }
 
         /**
          * Finds the correct configuration for showing the dialog
          */
         getWebviewConfig(navigationDetails) {
-            if (navigationDetails.frameType !== 'outermost_frame') return {webview: null, fromPanel: false};
+            const isSubFrame = navigationDetails.frameId && navigationDetails.frameId !== 0,
+                isNonOutermostFrame = navigationDetails.frameType && navigationDetails.frameType !== 'outermost_frame';
+            if (isSubFrame || isNonOutermostFrame) return {webview: null, fromPanel: false};
 
             // first dialog from tab or webpanel
             let webview = document.querySelector(`webview[tab_id="${navigationDetails.tabId}"]`);
-            if (webview) return {webview, fromPanel: this.webviews.get(webview.id)?.fromPanel ?? webview.name === 'vivaldi-webpanel'};
+            if (webview) return {webview, fromPanel: this.getWebviewFromPanel(webview)};
 
             // follow-up dialog from the webpanel
             webview = Array.from(this.webviews.values()).find(view => view.fromPanel)?.webview;
@@ -138,6 +148,10 @@
             // follow-up dialog from tab
             const lastWebviewId = document.querySelector('.active.visible.webpageview .dialog-container:last-of-type webview')?.id;
             return {webview: this.webviews.get(lastWebviewId)?.webview, fromPanel: false};
+        }
+
+        getWebviewFromPanel(webview) {
+            return this.webviews.get(webview.id)?.fromPanel ?? webview.name === 'vivaldi-webpanel';
         }
 
         getActiveWebview() {
@@ -778,6 +792,136 @@
         }
     }
 
+    class WebviewLinkInteractionUtils {
+        watchedWebviews = new WeakSet();
+        targetUrls = new WeakMap();
+        activeMiddleHold = null;
+
+        constructor(getWebviewFromPanel, openDialog, timingConfig) {
+            this.getWebviewFromPanel = getWebviewFromPanel;
+            this.openDialog = openDialog;
+            this.timingConfig = timingConfig;
+
+            this.prepareOpenWebviews();
+            this.observeWebviews();
+        }
+
+        prepareOpenWebviews() {
+            document.querySelectorAll('webview[tab_id]').forEach(webview => this.prepareWebview(webview));
+        }
+
+        observeWebviews() {
+            const root = document.getElementById('browser') || document.body;
+            if (!root) return;
+
+            const prepareNode = node => {
+                if (!(node instanceof Element)) return;
+
+                if (node.matches('webview[tab_id]')) {
+                    this.prepareWebview(node);
+                }
+
+                node.querySelectorAll?.('webview[tab_id]').forEach(webview => this.prepareWebview(webview));
+            };
+
+            new MutationObserver(mutations => {
+                mutations.forEach(mutation => {
+                    if (mutation.type === 'attributes') {
+                        prepareNode(mutation.target);
+                        return;
+                    }
+
+                    mutation.addedNodes.forEach(prepareNode);
+                });
+            }).observe(root, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['tab_id']
+            });
+        }
+
+        prepareWebview(webview) {
+            if (this.watchedWebviews.has(webview)) return;
+
+            this.watchedWebviews.add(webview);
+            // targeturlchanged reports the link URL Vivaldi would show in the status bar,
+            // so middle-click handling does not need code injected into every website.
+            webview.addEventListener('targeturlchanged', event => this.#handleTargetUrlChanged(webview, event));
+            webview.addEventListener('mousedown', event => this.#handleMouseDown(webview, event), true);
+            webview.addEventListener('mouseup', event => this.#handleMouseUp(webview, event), true);
+            webview.addEventListener('mouseleave', () => this.#cancelMiddleHold(webview), true);
+            webview.addEventListener('dragstart', () => this.#cancelMiddleHold(webview), true);
+        }
+
+        #handleTargetUrlChanged(webview, event) {
+            const url = event.newUrl || '';
+
+            if (UrlUtils.isValid(url)) {
+                this.targetUrls.set(webview, url);
+            } else {
+                this.targetUrls.delete(webview);
+            }
+        }
+
+        #handleMouseDown(webview, event) {
+            const url = this.targetUrls.get(webview);
+            if (!url) return;
+
+            const origin = {x: event.clientX, y: event.clientY};
+
+            if (event.ctrlKey && event.altKey && [0, 1].includes(event.button)) {
+                this.#cancelNativeClick(event);
+                this.#openDialogFromWebview(webview, url, origin);
+                return;
+            }
+
+            if (event.button !== 1) return;
+
+            this.#cancelNativeClick(event);
+            this.#cancelMiddleHold();
+
+            const holdState = {
+                webview,
+                timer: setTimeout(() => {
+                    holdState.opened = true;
+                    this.#openDialogFromWebview(webview, url, origin);
+                }, this.timingConfig.middleClickDelay),
+                opened: false
+            };
+
+            this.activeMiddleHold = holdState;
+        }
+
+        #handleMouseUp(webview, event) {
+            if (event.button !== 1) return;
+
+            const holdState = this.activeMiddleHold;
+            if (!holdState || holdState.webview !== webview) return;
+
+            if (holdState.opened) this.#cancelNativeClick(event);
+            this.#cancelMiddleHold(webview);
+        }
+
+        #cancelMiddleHold(webview = undefined) {
+            const holdState = this.activeMiddleHold;
+            if (!holdState || (webview && holdState.webview !== webview)) return;
+
+            clearTimeout(holdState.timer);
+            this.activeMiddleHold = null;
+        }
+
+        #openDialogFromWebview(webview, url, origin) {
+            this.openDialog(url, this.getWebviewFromPanel(webview), origin);
+        }
+
+        #cancelNativeClick(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        }
+    }
+
     class WebsiteInjectionUtils {
         constructor(getWebviewConfig, openDialog, iconConfig, timingConfig) {
             this.linkInteractionConfig = JSON.stringify({
@@ -834,43 +978,10 @@
             this.#initialize();
         }
 
-        /**
-         * Checks if a link is clicked by the middle mouse while pressing Ctrl + Alt, then fires an event with the Url
-         */
         #initialize() {
-            this.#setupMouseHandling();
-
             if (this.iconConfig.linkIcon) {
                 this.#setupIconHandling();
             }
-        }
-
-        /**
-         * Richtet die Maus-Event-Listener ein
-         */
-        #setupMouseHandling() {
-            let holdTimerForMiddleClick;
-
-            document.addEventListener('pointerdown', event => {
-                // Check if the Ctrl key, Alt key, and mouse button were pressed
-                if (event.ctrlKey && event.altKey && [0, 1].includes(event.button)) {
-                    this.#callDialog(event);
-                } else if (event.button === 1) {
-                    // MMB-hold: cache link+coords NOW, use after timeout (prevents drift)
-                    const link = this.#getLinkElement(event);
-                    if (!link) return;
-                    const px = event.clientX,
-                        py = event.clientY;
-                    const href = link.href;
-                    holdTimerForMiddleClick = setTimeout(() => {
-                        this.#sendDialogMessage(href, px, py);
-                    }, this.timingConfig.middleClickDelay);
-                }
-            });
-
-            document.addEventListener('pointerup', event => {
-                if (event.button === 1) clearTimeout(holdTimerForMiddleClick);
-            });
         }
 
         #setupIconHandling() {
@@ -954,19 +1065,17 @@
         }
 
         #getLinkElement(event) {
-            return event.target.closest('a[href]:not([href="#"])');
+            const getAnchor = node => {
+                if (node instanceof HTMLAnchorElement && node.getAttribute('href') !== '#') return node;
+                if (node instanceof Element) return node.closest('a[href]:not([href="#"])');
+            };
+
+            const pathLink = (event.composedPath?.() || []).map(getAnchor).find(Boolean);
+            return pathLink || getAnchor(event.target);
         }
 
         #sendDialogMessage(url, x, y) {
             chrome.runtime.sendMessage({url, fromPanel: this.fromPanel, origin: {x, y}});
-        }
-
-        #callDialog(event) {
-            let link = this.#getLinkElement(event);
-            if (link) {
-                event.preventDefault();
-                this.#sendDialogMessage(link.href, event.clientX, event.clientY);
-            }
         }
 
         #createIconStyle() {
