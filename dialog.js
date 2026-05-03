@@ -74,7 +74,6 @@
         // Animation constants
         ANIMATION_DURATIONS = {
             CLOSE_TIMEOUT: 800, // Fallback timeout for close animation
-            FADE_DELAY: 90, // Delay before starting fade animation
             OPTIONS_FADE: 300, // Fade timing for swapping title and options
             OPTIONS_HIDE: 1500 // Options container hide delay
         };
@@ -228,8 +227,6 @@
             requestAnimationFrame(() => {
                 container.classList.remove('is-open'); // overlay fades out via transition
                 container.classList.add('is-leave'); // optional: block clicks
-                // remove blur immediately so background is crisp while closing
-                container.style.backdropFilter = 'none';
 
                 dialogTab.classList.add('animating-close');
 
@@ -525,32 +522,17 @@
 
                 requestAnimationFrame(() => {
                     if (lifetime.signal.aborted) return;
-                    const t = this.setAnchoredTransformVars(dialogTab, pointerX, pointerY); // sets --tx0/--ty0/--s0 and returns numbers
-                    // show anchored start inline immediately
-                    dialogTab.style.transform = `translate(${t.t0x}px, ${t.t0y}px) scale(${t.s0})`;
-                    dialogTab.style.opacity = '0';
+                    this.setAnchoredTransformVars(dialogTab, pointerX, pointerY);
                     dialogTab.style.visibility = 'visible';
-                    dialogTab.getBoundingClientRect();
+                    dialogContainer.classList.add('is-open');
+                    dialogTab.classList.add('animating-open');
 
-                    requestAnimationFrame(() => {
-                        if (lifetime.signal.aborted) return;
-                        dialogContainer.classList.add('is-open');
-                        const openDelay = setTimeout(() => {
-                            if (lifetime.signal.aborted) return;
-                            dialogTab.classList.add('animating-open');
-
-                            const onOpenEnd = e => {
-                                if (e.animationName === 'dialog-tab-open-anchored') {
-                                    dialogTab.classList.remove('animating-open');
-                                    // cleanup inline styles
-                                    dialogTab.style.removeProperty('transform');
-                                    dialogTab.style.removeProperty('opacity');
-                                }
-                            };
-                            dialogTab.addEventListener('animationend', onOpenEnd, {signal: lifetime.signal});
-                        }, this.ANIMATION_DURATIONS.FADE_DELAY);
-                        lifetime.add(() => clearTimeout(openDelay));
-                    });
+                    const onOpenEnd = e => {
+                        if (e.animationName === 'dialog-tab-open-anchored') {
+                            dialogTab.classList.remove('animating-open');
+                        }
+                    };
+                    dialogTab.addEventListener('animationend', onOpenEnd, {signal: lifetime.signal});
                 });
             });
         }
