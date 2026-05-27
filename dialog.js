@@ -32,13 +32,20 @@
         };
 
     // Wait for the browser to come to a ready state
-    setTimeout(function waitDialog() {
-        const browser = document.getElementById('browser');
-        if (!browser) {
-            return setTimeout(waitDialog, 300);
+    function initDialog() {
+        if (document.getElementById('browser')) {
+            new DialogMod();
+        } else {
+            const observer = new MutationObserver((mutations, obs) => {
+                if (document.getElementById('browser')) {
+                    obs.disconnect();
+                    new DialogMod();
+                }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
         }
-        new DialogMod();
-    }, 300);
+    }
+    initDialog();
 
     class DialogLifetime {
         #controller = new AbortController();
@@ -712,12 +719,10 @@
 
         /**
          * Returns a unique, collision-resistant id.
-         * Uses timestamp + random alphanumeric string for uniqueness.
+         * Uses crypto.randomUUID() for uniqueness.
          */
         getWebviewId() {
-            const timestamp = Date.now();
-            const randomPart = Math.random().toString(36).substring(2, 11);
-            return `${timestamp}-${randomPart}`;
+            return crypto.randomUUID();
         }
 
         /**

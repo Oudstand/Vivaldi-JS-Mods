@@ -14,16 +14,28 @@
         hideTabs = true, // set to false to not hide the tabs - currently only works with vertical tabs
         useTwoLevelTabStack = false; // set to true if you use two level tab stack to recalculate height
 
-    setTimeout(function waitFullscreen() {
+    function initFullscreen() {
         const browser = document.getElementById('browser');
-        if (!browser) {
-            return setTimeout(waitFullscreen, 300);
+        if (browser) {
+            console.log('Browser');
+            new FullscreenMod();
+        } else {
+            const observer = new MutationObserver((mutations, obs) => {
+                if (document.getElementById('browser')) {
+                    obs.disconnect();
+                    console.log('Browser');
+                    new FullscreenMod();
+                }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
         }
-        console.log('Browser');
-        new FullscreenMod();
-    }, 300);
+    }
+    initFullscreen();
 
     class FullscreenMod {
+        #elements = {};
+        #updateHoverDivsTimeout = null;
+
         positions = ['top', 'bottom', 'left', 'right'];
 
         fullscreenEnabled;
@@ -234,7 +246,8 @@
         }
 
         updateHoverDivs() {
-            setTimeout(() => {
+            if (this.#updateHoverDivsTimeout) clearTimeout(this.#updateHoverDivsTimeout);
+            this.#updateHoverDivsTimeout = setTimeout(() => {
                 this.setHorizontalHoverDivHeight(this.hoverDivTop);
                 if (this.hoverDivLeft) this.setVerticalHoverDivWidth(this.hoverDivLeft);
                 if (this.hoverDivRight) this.setVerticalHoverDivWidth(this.hoverDivRight);
@@ -275,9 +288,23 @@
 
             this.subcontainerObserver = new MutationObserver(mutations => {
                 for (const mutation of mutations) {
-                    const hit = [...mutation.addedNodes, ...mutation.removedNodes].some(
-                        node => node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer'
-                    );
+                    let hit = false;
+                    for (let i = 0; i < mutation.addedNodes.length; i++) {
+                        const node = mutation.addedNodes[i];
+                        if (node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer') {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if (!hit) {
+                        for (let i = 0; i < mutation.removedNodes.length; i++) {
+                            const node = mutation.removedNodes[i];
+                            if (node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer') {
+                                hit = true;
+                                break;
+                            }
+                        }
+                    }
 
                     if (hit) {
                         this.scheduleHeights();
@@ -672,48 +699,55 @@
             return css;
         }
 
+        #getElement(key, selector) {
+            if (!this.#elements[key] || !this.#elements[key].isConnected) {
+                this.#elements[key] = document.querySelector(selector);
+            }
+            return this.#elements[key];
+        }
+
         get app() {
-            return document.querySelector('#app');
+            return this.#getElement('app', '#app');
         }
 
         get browser() {
-            return document.querySelector('#browser');
+            return this.#getElement('browser', '#browser');
         }
 
         get webView() {
-            return document.querySelector('#webview-container');
+            return this.#getElement('webView', '#webview-container');
         }
 
         get header() {
-            return document.querySelector('#header');
+            return this.#getElement('header', '#header');
         }
 
         get mainBar() {
-            return document.querySelector('.mainbar');
+            return this.#getElement('mainBar', '.mainbar');
         }
 
         get bookmarkBar() {
-            return document.querySelector('.bookmark-bar');
+            return this.#getElement('bookmarkBar', '.bookmark-bar');
         }
 
         get panelsContainer() {
-            return document.querySelector('#panels-container');
+            return this.#getElement('panelsContainer', '#panels-container');
         }
 
         get tabBarContainer() {
-            return document.querySelector('#tabs-tabbar-container');
+            return this.#getElement('tabBarContainer', '#tabs-tabbar-container');
         }
 
         get panelsLeft() {
-            return document.querySelector('#panels-container').classList.contains('left');
+            return this.panelsContainer?.classList.contains('left');
         }
 
         get panelsRight() {
-            return document.querySelector('#panels-container').classList.contains('right');
+            return this.panelsContainer?.classList.contains('right');
         }
 
         get footer() {
-            return document.querySelector('#footer');
+            return this.#getElement('footer', '#footer');
         }
 
         get tabBarPosition() {

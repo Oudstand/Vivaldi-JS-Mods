@@ -83,6 +83,7 @@
     `;
 
     class DomainTitleBar {
+        #elements = {};
         urlFieldMutationObserver = null;
         titleMutationObserver = null;
         uiObserver = null;
@@ -296,20 +297,27 @@
 
         // getters
 
+        #getElement(key, selector) {
+            if (!this.#elements[key] || !this.#elements[key].isConnected) {
+                this.#elements[key] = document.querySelector(selector);
+            }
+            return this.#elements[key];
+        }
+
         get #browser() {
-            return document.querySelector('#browser');
+            return this.#getElement('browser', '#browser');
         }
 
         get #head() {
-            return document.querySelector('head');
+            return this.#getElement('head', 'head');
         }
 
         get #title() {
-            return document.querySelector('title');
+            return this.#getElement('title', 'title');
         }
 
         get #urlFieldInput() {
-            return document.querySelector('#urlFieldInput');
+            return this.#getElement('urlFieldInput', '#urlFieldInput');
         }
 
         get #activeWebview() {
@@ -317,11 +325,11 @@
         }
 
         get #urlBarAddressField() {
-            return document.querySelector('.UrlBar-AddressField');
+            return this.#getElement('urlBarAddressField', '.UrlBar-AddressField');
         }
 
         get #urlBarUrlFieldWrapper() {
-            return document.querySelector('.UrlBar-AddressField .UrlBar-UrlFieldWrapper');
+            return this.#getElement('urlBarUrlFieldWrapper', '.UrlBar-AddressField .UrlBar-UrlFieldWrapper');
         }
 
         get #urlFragmentWrapper() {
@@ -353,9 +361,15 @@
         if (document.querySelector('#urlFieldInput')) {
             window.domainTitleBar = new DomainTitleBar();
         } else {
-            setTimeout(initMod, 500);
+            const observer = new MutationObserver((mutations, obs) => {
+                if (document.querySelector('#urlFieldInput')) {
+                    obs.disconnect();
+                    window.domainTitleBar = new DomainTitleBar();
+                }
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
         }
     }
 
-    setTimeout(initMod, 500);
+    initMod();
 })();
