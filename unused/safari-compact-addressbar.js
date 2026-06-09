@@ -22,15 +22,22 @@
     const TAB_CLASS = 'safari-compact-addressbar-tab';
     const TAB_POSITION_CLASS = 'safari-compact-addressbar-tab-position';
 
-    const ACTIVE_TAB_WIDTH_RATIO = 0.34;
-    const MAX_ACTIVE_TAB_WIDTH_RATIO = 0.42;
-    const MIN_INACTIVE_TAB_WIDTH = 54;
+    const OVERRIDE_VIVALDI_ACTIVE_TAB_MIN_WIDTH = true;
+    const VIVALDI_ACTIVE_TAB_MIN_WIDTH_PREF = 'vivaldi.tabs.active_min_size';
+    const ACTIVE_TAB_MIN_WIDTH = 360;
     const CLOSE_TRANSITION_MS = 220;
+    const TAB_LAYOUT_SETTLE_MS = 120;
 
     let addressField = null;
+    let addressFieldHome = null;
     let observer = null;
+    let resizeObserver = null;
+    let resizeObservedElements = new WeakSet();
+    let initialLayoutReady = false;
+    let layoutResizePending = false;
     let layoutSnapshot = null;
     let closeTransitionTimer = null;
+    let settledLayoutTimer = null;
     let scheduled = false;
 
     function getBrowser() {
@@ -57,6 +64,12 @@
         return tab;
     }
 
+    function getClosingTabFromEvent(event) {
+        return event.target
+            .closest('#tabs-tabbar-container .tab-position .tab .close')
+            ?.closest('#tabs-tabbar-container .tab-position .tab');
+    }
+
     function isHorizontalTabBar(browser) {
         return browser.classList.contains('tabs-top') || browser.classList.contains('tabs-bottom');
     }
@@ -70,11 +83,67 @@
         });
     }
 
+    function scheduleSettledRefresh() {
+        window.clearTimeout(settledLayoutTimer);
+        settledLayoutTimer = window.setTimeout(() => {
+            layoutResizePending = true;
+            refresh();
+        }, TAB_LAYOUT_SETTLE_MS);
+    }
+
+    function scheduleLayoutSettle() {
+        layoutResizePending = true;
+        clearExpandedTabLayout();
+        scheduleSettledRefresh();
+    }
+
+    async function syncActiveTabMinWidthPreference() {
+        if (!OVERRIDE_VIVALDI_ACTIVE_TAB_MIN_WIDTH || !globalThis.vivaldi?.prefs) return;
+
+        try {
+            const rawValue = await vivaldi.prefs.get(VIVALDI_ACTIVE_TAB_MIN_WIDTH_PREF);
+            const currentValue = typeof rawValue === 'object' && rawValue !== null && 'value' in rawValue
+                ? rawValue.value
+                : rawValue;
+            if (typeof currentValue === 'number' && currentValue >= ACTIVE_TAB_MIN_WIDTH) return;
+
+            await vivaldi.prefs.set({
+                path: VIVALDI_ACTIVE_TAB_MIN_WIDTH_PREF,
+                value: ACTIVE_TAB_MIN_WIDTH
+            });
+            scheduleLayoutSettle();
+        } catch (_) {
+            // Some Vivaldi builds expose prefs late; the mod still works with the current tab width.
+        }
+    }
+
     function focusUrlInput(field) {
         const input = field.querySelector('#urlFieldInput, input');
         if (!input) return;
         input.focus();
         input.select?.();
+    }
+
+    function rememberAddressFieldHome(field) {
+        if (addressFieldHome || !field.parentNode) return;
+
+        const marker = document.createComment('safari compact address bar field home');
+        field.parentNode.insertBefore(marker, field);
+        addressFieldHome = {marker};
+    }
+
+    function restoreAddressFieldHome(field) {
+        const marker = addressFieldHome?.marker;
+        if (!marker?.parentNode || field.parentNode === marker.parentNode) return;
+
+        marker.parentNode.insertBefore(field, marker.nextSibling);
+    }
+
+    function moveAddressFieldIntoTab(tab, field) {
+        rememberAddressFieldHome(field);
+        if (field.parentNode !== tab) {
+            tab.appendChild(field);
+        }
     }
 
     function getAddressFieldValue(field) {
@@ -96,6 +165,22 @@
     function readCssPixelValue(element, property, fallback) {
         const parsed = parseFloat(getComputedStyle(element).getPropertyValue(property));
         return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function readTranslateX(element) {
+        const transform = getComputedStyle(element).transform;
+        if (!transform || transform === 'none') return null;
+
+        try {
+            return new DOMMatrixReadOnly(transform).m41;
+        } catch (_) {
+            const matrix = transform.match(/^matrix(3d)?\((.+)\)$/);
+            if (!matrix) return null;
+
+            const values = matrix[2].split(',').map(value => parseFloat(value.trim()));
+            const translateX = matrix[1] ? values[12] : values[4];
+            return Number.isFinite(translateX) ? translateX : null;
+        }
     }
 
     function getTabPositionsInStrip(tab) {
@@ -125,16 +210,15 @@
         );
     }
 
-    function clearExpandedTabLayout({restore = true} = {}) {
+    function clearExpandedTabLayout() {
         document.querySelectorAll(`.${TAB_CLASS}`).forEach(tab => {
             tab.classList.remove(TAB_CLASS);
         });
 
         if (layoutSnapshot) {
-            const shouldRestoreSnapshot = restore && layoutSnapshot.tabs.every(isTabStateStillApplied);
             layoutSnapshot.tabs.forEach(tabState => {
                 tabState.element.classList.remove(TAB_POSITION_CLASS);
-                if (shouldRestoreSnapshot) {
+                if (isTabStateStillApplied(tabState)) {
                     restoreStyleProperty(tabState.element, '--Width', tabState.originalInlineWidth);
                     restoreStyleProperty(tabState.element, '--PositionX', tabState.originalInlinePositionX);
                 }
@@ -151,11 +235,14 @@
         const tabPositions = getTabPositionsInStrip(tab)
             .map(tabPosition => {
                 const rect = tabPosition.getBoundingClientRect();
+                const positionX = readCssPixelValue(tabPosition, '--PositionX', rect.left);
+                const translateX = readTranslateX(tabPosition);
                 return {
                     element: tabPosition,
                     tab: tabPosition.querySelector('.tab'),
                     width: readCssPixelValue(tabPosition, '--Width', rect.width),
-                    positionX: readCssPixelValue(tabPosition, '--PositionX', rect.left),
+                    positionX,
+                    originLeft: rect.left - (translateX ?? positionX),
                     viewportLeft: rect.left,
                     viewportTop: rect.top,
                     height: rect.height,
@@ -177,6 +264,50 @@
         return layoutSnapshot.tabs.some(tabState => !isTabStateStillApplied(tabState));
     }
 
+    function isExternalTabStyleMutation(mutation) {
+        if (mutation.attributeName !== 'style') return false;
+        if (!mutation.target.classList?.contains('tab-position')) return false;
+        if (!layoutSnapshot) return true;
+
+        const tabState = layoutSnapshot.tabs.find(state => state.element === mutation.target);
+        return !tabState || !isTabStateStillApplied(tabState);
+    }
+
+    function isAddressFieldMoveNode(node) {
+        return node === addressField ||
+            node.classList?.contains(FIELD_CLASS) ||
+            node.querySelector?.(`.${FIELD_CLASS}`);
+    }
+
+    function isTabStructureMutation(mutation) {
+        if (mutation.type !== 'childList') return false;
+
+        return [...mutation.addedNodes, ...mutation.removedNodes].some(node => (
+            node.nodeType === Node.ELEMENT_NODE &&
+            !isAddressFieldMoveNode(node) &&
+            (
+                node.classList?.contains('tab-position') ||
+                node.querySelector?.('.tab-position') ||
+                node.closest?.('#tabs-tabbar-container .tab-strip')
+            )
+        ));
+    }
+
+    function isRelevantClassMutation(mutation) {
+        if (mutation.attributeName !== 'class') return false;
+        return Boolean(mutation.target.closest?.('#tabs-container'));
+    }
+
+    function isToolbarLayoutMutation(mutation) {
+        if (mutation.attributeName !== 'class') return false;
+
+        return Boolean(
+            mutation.target.closest?.('#tabs-container > .toolbar-tabbar-before') ||
+            mutation.target.closest?.('#tabs-container > .toolbar-tabbar-after') ||
+            mutation.target.closest?.('.toolbar-mailbar')
+        );
+    }
+
     function isLayoutSnapshotCurrent(tab, activeTabPosition) {
         if (!layoutSnapshot || layoutSnapshot.activeTabPosition !== activeTabPosition) return false;
         if (hasExternalTabLayoutChange()) return false;
@@ -192,10 +323,7 @@
         return Math.abs(stripWidth - layoutSnapshot.stripWidth) < 1;
     }
 
-    function updateExpandedTabLayout(tab) {
-        const activeTabPosition = getTabPosition(tab);
-        if (!activeTabPosition) return;
-
+    function updateExpandedPinnedTabLayout(tab, activeTabPosition) {
         if (!layoutSnapshot || !layoutSnapshot.tabs.some(tabState => tabState.element === activeTabPosition)) {
             const {tabPositions, stripWidth} = captureTabLayout(tab);
             layoutSnapshot = {
@@ -206,81 +334,86 @@
         }
 
         const activeTabState = layoutSnapshot.tabs.find(tabState => tabState.element === activeTabPosition);
-        if (!activeTabState) return;
+        if (!activeTabState) return null;
 
-        const maxActiveWidth = Math.max(activeTabState.width, layoutSnapshot.stripWidth * MAX_ACTIVE_TAB_WIDTH_RATIO);
-        let targetActiveWidth = clamp(
-            layoutSnapshot.stripWidth * ACTIVE_TAB_WIDTH_RATIO,
-            activeTabState.width,
-            maxActiveWidth
-        );
-
-        const requestedExtraWidth = Math.max(0, targetActiveWidth - activeTabState.width);
-        const shrinkableTabs = layoutSnapshot.tabs.filter(tabState => tabState !== activeTabState);
-        const availableShrink = shrinkableTabs.reduce(
-            (total, tabState) => total + Math.max(0, tabState.width - MIN_INACTIVE_TAB_WIDTH),
-            0
-        );
-        const usedExtraWidth = Math.min(requestedExtraWidth, availableShrink);
-
-        targetActiveWidth = activeTabState.width + usedExtraWidth;
-
-        const targetWidths = new Map();
-        targetWidths.set(activeTabState.element, targetActiveWidth);
-
-        shrinkableTabs.forEach(tabState => {
-            const shrinkCapacity = Math.max(0, tabState.width - MIN_INACTIVE_TAB_WIDTH);
-            const shrink = availableShrink > 0 ? usedExtraWidth * (shrinkCapacity / availableShrink) : 0;
-            targetWidths.set(tabState.element, tabState.width - shrink);
-        });
-
-        let nextPositionX = layoutSnapshot.tabs[0]?.positionX || 0;
+        const targetActiveWidth = Math.max(activeTabState.width, ACTIVE_TAB_MIN_WIDTH);
+        const positionShift = targetActiveWidth - activeTabState.width;
         let activeGeometry = null;
 
-        layoutSnapshot.tabs.forEach((tabState, index) => {
-            const previousTabState = layoutSnapshot.tabs[index - 1];
-            if (previousTabState) {
-                const previousOriginalEnd = previousTabState.positionX + previousTabState.width;
-                nextPositionX += Math.max(0, tabState.positionX - previousOriginalEnd);
-            }
-
-            const width = targetWidths.get(tabState.element) || tabState.width;
+        layoutSnapshot.tabs.forEach(tabState => {
+            const isActiveTab = tabState === activeTabState;
+            const width = isActiveTab ? targetActiveWidth : tabState.width;
+            const positionX = tabState.positionX > activeTabState.positionX
+                ? tabState.positionX + positionShift
+                : tabState.positionX;
             const widthValue = `${width}px`;
-            const positionValue = `${nextPositionX}px`;
+            const positionValue = `${positionX}px`;
 
-            tabState.element.classList.toggle(TAB_POSITION_CLASS, tabState === activeTabState);
+            tabState.element.classList.toggle(TAB_POSITION_CLASS, isActiveTab);
             tabState.element.style.setProperty('--Width', widthValue);
             tabState.element.style.setProperty('--PositionX', positionValue);
             tabState.appliedInlineWidth = widthValue;
             tabState.appliedInlinePositionX = positionValue;
 
-            if (tabState === activeTabState) {
+            if (isActiveTab) {
                 activeGeometry = {
-                    left: tabState.viewportLeft - tabState.positionX + nextPositionX,
+                    left: tabState.originLeft + positionX,
                     top: tabState.viewportTop,
                     width,
                     height: tabState.height
                 };
             }
-
-            nextPositionX += width;
         });
 
         return activeGeometry;
+    }
+
+    function updateExpandedTabLayout(tab) {
+        const activeTabPosition = getTabPosition(tab);
+        if (!activeTabPosition) return;
+
+        if (tab.classList.contains('pinned')) {
+            return updateExpandedPinnedTabLayout(tab, activeTabPosition);
+        }
+
+        document.querySelectorAll(`.${TAB_POSITION_CLASS}`).forEach(tabPosition => {
+            tabPosition.classList.toggle(TAB_POSITION_CLASS, tabPosition === activeTabPosition);
+        });
+
+        const rect = activeTabPosition.getBoundingClientRect();
+        return {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height
+        };
     }
 
     function refreshExpandedTabLayout(tab, field) {
         const activeTabPosition = getTabPosition(tab);
         if (!activeTabPosition) return null;
 
-        if (layoutSnapshot && !isLayoutSnapshotCurrent(tab, activeTabPosition)) {
-            clearExpandedTabLayout({restore: !hasExternalTabLayoutChange()});
+        if (layoutSnapshot && (layoutResizePending || !isLayoutSnapshotCurrent(tab, activeTabPosition))) {
+            clearExpandedTabLayout();
             tab.classList.add(TAB_CLASS);
             updateProjectedAddressField(tab, field);
             void field.offsetWidth;
         }
+        layoutResizePending = false;
 
         return updateExpandedTabLayout(tab);
+    }
+
+    function observeResizeTarget(element) {
+        if (!resizeObserver || !element || resizeObservedElements.has(element)) return;
+
+        resizeObservedElements.add(element);
+        resizeObserver.observe(element);
+    }
+
+    function observeLayoutResizeTargets() {
+        observeResizeTarget(document.querySelector('#tabs-container'));
+        observeResizeTarget(document.querySelector('#tabs-tabbar-container'));
     }
 
     function setProjectedAddressFieldGeometry(field, geometry) {
@@ -309,7 +442,7 @@
         if (!activeTabState) return null;
 
         return {
-            left: activeTabState.viewportLeft,
+            left: activeTabState.originLeft + activeTabState.positionX,
             top: activeTabState.viewportTop,
             width: activeTabState.width,
             height: activeTabState.height
@@ -324,6 +457,7 @@
     }
 
     function resetAddressFieldProjection(field) {
+        restoreAddressFieldHome(field);
         field.classList.remove(FIELD_CLASS);
         clearProjectedAddressField(field);
     }
@@ -338,14 +472,12 @@
             browser.classList.toggle(CLOSING_CLASS, animate);
         }
 
-        const closingGeometry = getOriginalActiveTabGeometry();
         clearExpandedTabLayout();
-        setProjectedAddressFieldGeometry(field, closingGeometry);
+        resetAddressFieldProjection(field);
 
         if (browser) {
             browser.classList.remove(OPEN_CLASS);
             closeTransitionTimer = window.setTimeout(() => {
-                resetAddressFieldProjection(field);
                 browser.classList.remove(CLOSING_CLASS);
             }, animate ? CLOSE_TRANSITION_MS : 0);
         } else {
@@ -369,8 +501,8 @@
 
         resetAddressFieldProjection(field);
         clearExpandedTabLayout();
-        updateProjectedAddressField(tab, field);
         tab.classList.add(TAB_CLASS);
+        moveAddressFieldIntoTab(tab, field);
         field.classList.add(FIELD_CLASS);
         browser.classList.add(ROOT_CLASS, OPEN_CLASS);
         void field.offsetWidth;
@@ -386,6 +518,21 @@
         if (!browser?.classList.contains(ROOT_CLASS)) return;
 
         const field = getAddressField();
+        const closingTab = getClosingTabFromEvent(event);
+        if (field && closingTab?.classList.contains(TAB_CLASS)) {
+            resetAddressFieldProjection(field);
+            clearExpandedTabLayout();
+            setTimeout(() => {
+                const activeTab = getActiveTab();
+                if (KEEP_ADDRESS_FIELD_OPEN && activeTab) {
+                    openAddressField(activeTab, false);
+                    return;
+                }
+                refresh();
+            }, TAB_LAYOUT_SETTLE_MS);
+            return;
+        }
+
         if (field?.contains(event.target)) return;
 
         const clickedTab = getTabFromEvent(event);
@@ -423,7 +570,10 @@
         const field = getAddressField();
         if (!browser || !field) return;
 
+        observeLayoutResizeTargets();
         browser.classList.toggle(ROOT_CLASS, ENABLED && isHorizontalTabBar(browser));
+        if (!initialLayoutReady) return;
+
         const activeTab = getActiveTab();
         if (!browser.classList.contains(ROOT_CLASS) || browser.classList.contains('toolbar-edit-mode') || isDisabledUrl(field)) {
             closeAddressField();
@@ -436,6 +586,15 @@
         }
 
         const compactTab = document.querySelector(`.${TAB_CLASS}`);
+        if (browser.classList.contains(OPEN_CLASS) && !compactTab) {
+            if (KEEP_ADDRESS_FIELD_OPEN && activeTab) {
+                openAddressField(activeTab, false);
+                return;
+            }
+            closeAddressField();
+            return;
+        }
+
         if (browser.classList.contains(OPEN_CLASS) && compactTab && !compactTab.classList.contains('active')) {
             if (KEEP_ADDRESS_FIELD_OPEN && activeTab) {
                 openAddressField(activeTab, false);
@@ -453,29 +612,67 @@
     function init() {
         const browser = getBrowser();
         const field = getAddressField();
+        const tabsContainer = document.querySelector('#tabs-container');
 
-        if (!browser || !field) {
+        if (!browser || !field || !tabsContainer) {
             setTimeout(init, 500);
             return;
         }
 
         addressField = field;
         browser.classList.add(ROOT_CLASS);
+        syncActiveTabMinWidthPreference();
 
         document.addEventListener('pointerdown', handlePointerDown, true);
         document.addEventListener('keydown', handleKeyDown, true);
         window.addEventListener('resize', () => schedule(refresh), true);
         field.addEventListener('focusout', handleFocusOut, true);
+        globalThis.vivaldi?.prefs?.onChanged?.addListener?.(event => {
+            if (event?.path === VIVALDI_ACTIVE_TAB_MIN_WIDTH_PREF) scheduleLayoutSettle();
+        });
 
-        observer = new MutationObserver(() => schedule(refresh));
-        observer.observe(browser, {
+        if ('ResizeObserver' in window) {
+            resizeObserver = new ResizeObserver(() => {
+                scheduleLayoutSettle();
+            });
+            observeLayoutResizeTargets();
+        }
+
+        observer = new MutationObserver(mutations => {
+            const hasExternalTabStyleMutation = mutations.some(isExternalTabStyleMutation);
+            const hasTabStructureMutation = mutations.some(isTabStructureMutation);
+            const hasRelevantClassMutation = mutations.some(isRelevantClassMutation);
+            const hasToolbarLayoutMutation = mutations.some(isToolbarLayoutMutation);
+            const shouldRefresh = hasExternalTabStyleMutation || hasTabStructureMutation || hasRelevantClassMutation;
+            if (!shouldRefresh) return;
+
+            if (hasToolbarLayoutMutation) {
+                scheduleLayoutSettle();
+                if (!hasExternalTabStyleMutation && !hasTabStructureMutation) return;
+            }
+
+            if (hasExternalTabStyleMutation || hasTabStructureMutation) {
+                layoutResizePending = true;
+            }
+            if (hasTabStructureMutation) {
+                scheduleSettledRefresh();
+                if (!hasExternalTabStyleMutation && !hasRelevantClassMutation) return;
+            }
+            schedule(refresh);
+        });
+        observer.observe(tabsContainer, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['class']
+            attributeFilter: ['class', 'style'],
+            attributeOldValue: true
         });
 
-        refresh();
+        window.setTimeout(() => {
+            initialLayoutReady = true;
+            layoutResizePending = true;
+            refresh();
+        }, 150);
     }
 
     setTimeout(init, 500);
