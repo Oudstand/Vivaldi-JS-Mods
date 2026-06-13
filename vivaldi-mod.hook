@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Upgrade
+Operation = Install
+Type = Package
+Target = vivaldi-snapshot
+
+[Action]
+Description = Re-patch Vivaldi Snapshot UI Mods
+When = PostTransaction
+Exec = "/home/mark/Git/Vivaldi Mods/JS/patch-snapshot.sh"
