@@ -7,4 +7,4 @@ Target = vivaldi-snapshot
 [Action]
 Description = Re-patch Vivaldi Snapshot UI Mods
 When = PostTransaction
-Exec = "/home/mark/Git/Vivaldi Mods/JS/patch-snapshot.sh"
+Exec = "/home/mark/Git/Vivaldi Mods/JS/patch.sh" snapshot
