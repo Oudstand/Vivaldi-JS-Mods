@@ -29,7 +29,7 @@ set nrOfInstalls=0
 set "SuccessfulPatched=Couldn't Patch :^("
 
 for %%i in (%installPaths%) do (
-	<NUL set /p=Searching for newest window.html in %%~dpi... 
+	<NUL set /p=Searching for newest window.html in %%~dpi...
 	set /a nrOfInstalls=nrOfInstalls+1
 
 	set installPath=%%~dpi
@@ -56,12 +56,12 @@ for %%i in (%installPaths%) do (
 			copy /y "!latestVersionFolder!\window.html" "!latestVersionFolder!\window.bak.html"
 		)
 		echo.
-	)	
+	)
 )
 
 findstr /v custom.js "!latestVersionFolder!\window.html" > temp0.txt
 
-setlocal disabledelayedexpansion 
+setlocal disabledelayedexpansion
 
 (
   FOR /F "tokens=*" %%A IN (temp0.txt) DO (
@@ -73,7 +73,7 @@ setlocal disabledelayedexpansion
 ) >temp.txt
 
 
-setlocal enabledelayedexpansion 
+setlocal enabledelayedexpansion
 
 
 
