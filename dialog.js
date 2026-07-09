@@ -42,7 +42,7 @@
                     new DialogMod();
                 }
             });
-            observer.observe(document.documentElement, { childList: true, subtree: true });
+            observer.observe(document.documentElement, {childList: true, subtree: true});
         }
     }
     initDialog();
@@ -1267,7 +1267,18 @@
         };
         static #openViews = new Set();
         static #extractContentInPage = function () {
-            const preservedClasses = ['caption', 'emoji', 'hidden', 'invisible', 'sr-only', 'visually-hidden', 'visuallyhidden', 'wp-caption', 'wp-caption-text', 'wp-smiley'];
+            const preservedClasses = [
+                'caption',
+                'emoji',
+                'hidden',
+                'invisible',
+                'sr-only',
+                'visually-hidden',
+                'visuallyhidden',
+                'wp-caption',
+                'wp-caption-text',
+                'wp-smiley'
+            ];
             const escapeHtml = value => {
                 const node = document.createElement('div');
                 node.textContent = value || '';
@@ -1291,7 +1302,9 @@
             if (!reader) return {ready: true, content: ''};
 
             const cleanContent = window.DOMPurify.sanitize(reader.content);
-            const words = String(reader.textContent || '').split(/\s+/).filter(Boolean);
+            const words = String(reader.textContent || '')
+                .split(/\s+/)
+                .filter(Boolean);
             const readMinutes = Math.max(1, Math.round(words.length / 225));
             const readTime = readMinutes === 1 ? 'Lesedauer: 1 Minute' : 'Lesedauer: ' + readMinutes + ' Minuten';
             const byline = reader.byline ? escapeHtml(reader.byline) + ' &mdash; ' : '';
@@ -1300,10 +1313,12 @@
             return {
                 ready: true,
                 title: reader.title || document.title || '',
-                content: '<h1>' + escapeHtml(reader.title) + '</h1>' +
-                    '<p class="byline">' + byline + readTime + '</p>' +
-                    '<hr />' +
-                    '<article class="entry-content" dir="' + escapeHtml(direction) + '">' + cleanContent + '</article>'
+                content: [
+                    `<h1>${escapeHtml(reader.title)}</h1>`,
+                    `<p class="byline">${byline}${readTime}</p>`,
+                    '<hr />',
+                    `<article class="entry-content" dir="${escapeHtml(direction)}">${cleanContent}</article>`
+                ].join('')
             };
         };
 
@@ -1521,7 +1536,12 @@
         }
 
         static #getCurrentThemeColors() {
-            const hosts = [document.querySelector('#browser'), document.querySelector('.active.visible.webpageview'), document.body, document.documentElement].filter(Boolean),
+            const hosts = [
+                    document.querySelector('#browser'),
+                    document.querySelector('.active.visible.webpageview'),
+                    document.body,
+                    document.documentElement
+                ].filter(Boolean),
                 color = name => hosts.map(host => getComputedStyle(host).getPropertyValue(name).trim()).find(Boolean) || ReaderView.#COLOR_DEFAULTS[name];
 
             return {
@@ -1562,14 +1582,16 @@
     class ReaderToolbar {
         static ICONS = {
             sans: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M7.26579 2H8.50199L14 14H12.2038L10.5646 10.4651H5.33978L3.8099 14H2L7.26579 2ZM9.84747 8.94352L7.86682 4.61794L6.0296 8.94352H9.84747Z"/></svg>',
-            serif:
-                '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M9.57087 9.63143H5.15509L4.85492 10.3844C4.408 11.4698 4.18788 12.182 4.18788 12.5144C4.18788 12.8672 4.30795 13.1385 4.54141 13.3217C4.78155 13.5048 5.08171 13.5998 5.45525 13.5998V14H2V13.5998C2.51362 13.5184 2.9005 13.3352 3.1473 13.0435C3.39411 12.7518 3.70094 12.1481 4.05447 11.2256C4.08116 11.1374 4.22123 10.7982 4.46804 10.2148L7.84992 2H8.18344L12.0656 11.3951L12.5992 12.6365C12.7193 12.9146 12.8794 13.1317 13.0862 13.2945C13.2863 13.4573 13.5931 13.5591 14 13.5998V14H9.4308V13.5998C9.99111 13.5998 10.3713 13.5591 10.5648 13.4709C10.7649 13.3895 10.8583 13.2199 10.8583 12.9689C10.8583 12.84 10.7248 12.4601 10.4647 11.8293L9.57087 9.63143ZM9.42412 9.23799L7.36965 4.19785L5.32185 9.23799H9.42412Z"/></svg>',
-            lineTight: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M5.5 14l2.5-3 2.5 3h-5zM10.5 1l-2.5 3-2.5-3h5zM2 5h12v1h-12zM2 7h12v1h-12zM2 9h12v1h-12z"/></svg>',
-            lineLoose: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M5 3l2.5-3 2.5 3h-5zM10 12l-2.5 3-2.5-3h5zM2 4h11v1h-11zM2 7h11v1h-11zM2 10h11v1h-11z"/></svg>',
-            widthNarrow: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M15 10l-3-2.5 3-2.5v5zM3 4h7v1h-7zM3 6h7v1h-7zM3 8h7v1h-7zM3 10h4v1h-4z"/></svg>',
-            widthWide: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M13 5l3 2.5-3 2.5v-5zM0 4h11v1h-11zM0 6h11v1h-11zM0 8h11v1h-11zM0 10h7v1h-7z"/></svg>',
-            theme:
-                '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><circle fill="var(--kIconCircleFill)" stroke="var(--kIconCircleStroke)" stroke-width="1.1" stroke-opacity="0.8" cx="8" cy="8" r="4.5" /></svg>'
+            serif: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M9.57087 9.63143H5.15509L4.85492 10.3844C4.408 11.4698 4.18788 12.182 4.18788 12.5144C4.18788 12.8672 4.30795 13.1385 4.54141 13.3217C4.78155 13.5048 5.08171 13.5998 5.45525 13.5998V14H2V13.5998C2.51362 13.5184 2.9005 13.3352 3.1473 13.0435C3.39411 12.7518 3.70094 12.1481 4.05447 11.2256C4.08116 11.1374 4.22123 10.7982 4.46804 10.2148L7.84992 2H8.18344L12.0656 11.3951L12.5992 12.6365C12.7193 12.9146 12.8794 13.1317 13.0862 13.2945C13.2863 13.4573 13.5931 13.5591 14 13.5998V14H9.4308V13.5998C9.99111 13.5998 10.3713 13.5591 10.5648 13.4709C10.7649 13.3895 10.8583 13.2199 10.8583 12.9689C10.8583 12.84 10.7248 12.4601 10.4647 11.8293L9.57087 9.63143ZM9.42412 9.23799L7.36965 4.19785L5.32185 9.23799H9.42412Z"/></svg>',
+            lineTight:
+                '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M5.5 14l2.5-3 2.5 3h-5zM10.5 1l-2.5 3-2.5-3h5zM2 5h12v1h-12zM2 7h12v1h-12zM2 9h12v1h-12z"/></svg>',
+            lineLoose:
+                '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M5 3l2.5-3 2.5 3h-5zM10 12l-2.5 3-2.5-3h5zM2 4h11v1h-11zM2 7h11v1h-11zM2 10h11v1h-11z"/></svg>',
+            widthNarrow:
+                '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M15 10l-3-2.5 3-2.5v5zM3 4h7v1h-7zM3 6h7v1h-7zM3 8h7v1h-7zM3 10h4v1h-4z"/></svg>',
+            widthWide:
+                '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M13 5l3 2.5-3 2.5v-5zM0 4h11v1h-11zM0 6h11v1h-11zM0 8h11v1h-11zM0 10h7v1h-7z"/></svg>',
+            theme: '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><circle fill="var(--kIconCircleFill)" stroke="var(--kIconCircleStroke)" stroke-width="1.1" stroke-opacity="0.8" cx="8" cy="8" r="4.5" /></svg>'
         };
 
         constructor({signal, settingsIcon, onPatch, onAdjust}) {
@@ -1596,12 +1618,27 @@
                     {className: 'font-family-serif', title: 'Serif', html: icon.serif, action: () => this.onPatch({fontFamily: 'serif'})}
                 ],
                 [
-                    {className: 'decrease-font-size', title: 'Schriftgröße verkleinern', html: icon.sans, action: () => this.onAdjust('fontSize', -0.1, 0.8, 2.4)},
+                    {
+                        className: 'decrease-font-size',
+                        title: 'Schriftgröße verkleinern',
+                        html: icon.sans,
+                        action: () => this.onAdjust('fontSize', -0.1, 0.8, 2.4)
+                    },
                     {className: 'increase-font-size', title: 'Schriftgröße vergrößern', html: icon.sans, action: () => this.onAdjust('fontSize', 0.1, 0.8, 2.4)}
                 ],
                 [
-                    {className: 'decrease-line-height', title: 'Zeilenabstand verringern', html: icon.lineTight, action: () => this.onAdjust('lineHeight', -0.1, 1.1, 2.4)},
-                    {className: 'increase-line-height', title: 'Zeilenabstand vergrößern', html: icon.lineLoose, action: () => this.onAdjust('lineHeight', 0.1, 1.1, 2.4)}
+                    {
+                        className: 'decrease-line-height',
+                        title: 'Zeilenabstand verringern',
+                        html: icon.lineTight,
+                        action: () => this.onAdjust('lineHeight', -0.1, 1.1, 2.4)
+                    },
+                    {
+                        className: 'increase-line-height',
+                        title: 'Zeilenabstand vergrößern',
+                        html: icon.lineLoose,
+                        action: () => this.onAdjust('lineHeight', 0.1, 1.1, 2.4)
+                    }
                 ],
                 [
                     {className: 'decrease-width', title: 'Spalten verschmälern', html: icon.widthNarrow, action: () => this.onAdjust('width', -4, 36, 96)},
