@@ -424,6 +424,31 @@
     },
   };
 
+  const commands = await getCommands();
+
+  async function getCommands() {
+    const commands = {};
+    try {
+      const response = await fetch(chrome.runtime.getURL('bundle.js'));
+      const bundleScript = await response.text();
+      const matches = Array.from(bundleScript.matchAll(/category\s*:\s*"([^"]+)",[\s\S]*?guid\s*:\s*"([^"]+)",[\s\S]*?\("(([^"]+)"\s*,\s*")?([^"]+)"\)/g));
+
+      matches.forEach(match => {
+        commands[match[2]] = {
+          category: match[1],
+          key: match[2],
+          message: match[5],
+          messageType: match[4],
+          label: gnoh.i18n.getMessage(match[5], match[4]),
+        };
+      });
+    } catch (error) {
+      console.error(error);
+    }
+
+    return commands;
+  }
+
   function highlightJson(element, text) {
     CSS.highlights.delete('json-number');
     CSS.highlights.delete('json-bool');
@@ -632,7 +657,7 @@
       return;
     }
     const commandList = await getCommandChains();
-    const commandChain = commandList.find(c => c.key === key);
+    const commandChain = commandList.value.find(c => c.key === key);
     fixLanguageExport(commandChain);
     let commandChainText = JSON.stringify(commandChain);
     let commandListChecked = {
@@ -707,7 +732,7 @@
 
     const checkboxes = [];
 
-    commandList.forEach(command => {
+    commandList.value.forEach(command => {
       const item = gnoh.createElement('label', {
         class: 'item',
         tabindex: -1,
@@ -761,7 +786,7 @@
         events: {
           click: () => {
             checkboxes.forEach(checkbox => checkbox.checked = true);
-            commandListChecked = commandList.reduce((previousValue, currentValue) => {
+            commandListChecked = commandList.value.reduce((previousValue, currentValue) => {
               previousValue[currentValue.key] = currentValue;
               return previousValue;
             }, {});
@@ -838,7 +863,7 @@
 
     const chainedCommandItemValue = gnoh.createElement('div', {
       class: 'chained-command-item-value',
-      text: chain.label || '',
+      text: commands[chain.key]?.label || chain.label || '',
     }, chainedCommandItemTitle);
 
     if (typeof chain.param !== 'undefined') {
@@ -940,7 +965,11 @@
     return commandChains.every(
       (commandChain) => commandChain.category === 'CATEGORY_COMMAND_CHAIN'
         && Array.isArray(commandChain.chain)
-        && commandChain.chain.every(c => typeof c.key === 'string' && gnoh.uuid.check(c.key))
+        && commandChain.chain.every(c =>
+          typeof c.key === 'string'
+          && (typeof c.label === 'undefined' || typeof c.label === 'string')
+          && (typeof c.name === 'undefined' || typeof c.name === 'string')
+        )
         && typeof commandChain.key === 'string'
         && typeof commandChain.label === 'string'
         && typeof commandChain.name === 'string'
@@ -953,7 +982,7 @@
 
   async function getCommandChainByKey(key) {
     const commandList = await getCommandChains();
-    const commandChain = commandList.find(c => c.key === key);
+    const commandChain = commandList.value.find(c => c.key === key);
     if (commandChain) {
       return commandChain;
     } else {
@@ -971,18 +1000,18 @@
     const commandList = await getCommandChains();
 
     commandChains.forEach((commandChain) => {
-      const index = commandList.findIndex(c => c.key === commandChain.key);
+      const index = commandList.value.findIndex(c => c.key === commandChain.key);
 
       if (index === -1) {
-        commandList.push(commandChain);
+        commandList.value.push(commandChain);
       } else {
-        commandList[index] = commandChain;
+        commandList.value[index] = commandChain;
       }
     })
 
     vivaldi.prefs.set({
       path: 'vivaldi.chained_commands.command_list',
-      value: commandList
+      value: commandList.value,
     });
   }
 
@@ -1093,8 +1122,8 @@
     }
   });
 
-  vivaldi.prefs.onChanged.addListener(async newValue => {
-    if (newValue.path === 'vivaldi.chained_commands.command_list') {
+  vivaldi.prefs.onChanged.addListener(async (path) => {
+    if (path === 'vivaldi.chained_commands.command_list') {
       const tabs = await chrome.tabs.query({ url: '*://forum.vivaldi.net/topic/*' });
       tabs.forEach(tab => {
         chrome.tabs.sendMessage(tab.id, {
@@ -1130,7 +1159,7 @@
         }
         const commandList = await getCommandChains();
         const indexSelected = gnoh.element.getIndex(itemSelected);
-        return commandList[indexSelected]?.key;
+        return commandList.value[indexSelected]?.key;
       }
 
       Object.values(buttons).forEach((button) => {
