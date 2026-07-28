@@ -53,15 +53,21 @@ echo "=== Vivaldi-Mods Patch: Variante '$VARIANT' ==="
 # ==========================================
 # 1. VIVALDI BEENDEN
 # ==========================================
-echo "Beende Vivaldi..."
-pkill -x vivaldi-bin 2>/dev/null || true
-pkill -x vivaldi 2>/dev/null || true
-pkill -x vivaldi-snapshot 2>/dev/null || true
-# Auf das tatsaechliche Prozessende warten (max. ~10s) statt blind zu schlafen
-for _ in $(seq 1 20); do
-    pgrep -x vivaldi-bin >/dev/null 2>&1 || break
-    sleep 0.5
-done
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Beende Vivaldi..."
+
+    pkill -x vivaldi-bin 2>/dev/null || true
+    pkill -x vivaldi 2>/dev/null || true
+    pkill -x vivaldi-snapshot 2>/dev/null || true
+
+    for _ in $(seq 1 20); do
+        pgrep -x vivaldi-bin >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+else
+    echo "Root-Hook erkannt: Vivaldi wird nicht beendet."
+    echo "Die Mods werden beim nächsten Browserstart aktiv."
+fi
 
 # ==========================================
 # 2. GIT UPDATES (pull changes)
@@ -99,15 +105,15 @@ fi
 
 echo "Vivaldi Installation gefunden."
 
-# Backup-Logik: Wir stellen IMMER erst das Original wieder her,
-# damit "custom.js" nicht mehrfach eingefuegt wird.
-if [ -f "$HTML_FILE.bak" ]; then
-    echo "Stelle Original-Backup wieder her..."
-    sudo cp "$HTML_FILE.bak" "$HTML_FILE"
-else
-    echo "Erstelle erstes Backup..."
-    sudo cp "$HTML_FILE" "$HTML_FILE.bak"
-fi
+# Eine eventuell bereits vorhandene eigene Einbindung entfernen.
+# Dadurch bleibt das Skript idempotent, ohne eine alte Vivaldi-Datei
+# über eine frisch aktualisierte window.html zu kopieren.
+sudo sed -i \
+    '\|^[[:space:]]*<script src="custom\.js"></script>[[:space:]]*$|d' \
+    "$HTML_FILE"
+
+# Backup der aktuell installierten, ungepatchten Vivaldi-Datei.
+sudo cp -a "$HTML_FILE" "$HTML_FILE.bak"
 
 # ==========================================
 # 4. JS ZUSAMMENFUEHREN -> custom.js
