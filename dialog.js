@@ -45,7 +45,8 @@
             observer.observe(document.documentElement, {childList: true, subtree: true});
         }
     }
-    initDialog();
+
+    queueMicrotask(initDialog);
 
     class DialogLifetime {
         #controller = new AbortController();

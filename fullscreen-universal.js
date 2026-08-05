@@ -30,7 +30,8 @@
             observer.observe(document.documentElement, { childList: true, subtree: true });
         }
     }
-    initFullscreen();
+
+    queueMicrotask(initFullscreen);
 
     class FullscreenMod {
         #elements = {};
