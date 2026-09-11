@@ -7,7 +7,7 @@
             showUrlInput: true // true = shows the URL input in the options container, false = title + buttons only
         },
         ICON_CONFIG = {
-            linkIcon: '', // if set, an icon shows up after links - example values 'fa-solid fa-up-right-from-square', 'fa-solid fa-circle-info', 'fa-regular fa-square' search for other icons: https://fontawesome.com/search?o=r&ic=free&s=solid&ip=classic
+            linkIcon: '', // available values: 'arrow-up-right', 'info-circle', 'square-outline'; set to '' to disable
             linkIconInteractionOnHover: true, // if false, you have to click the icon to show the dialog - if true, the dialog shows on mouseenter
             showIconDelay: 250, // set to 0 to disable - delays showing the icon on hovering a link
             showDialogOnHoverDelay: 250 // set to 0 to disable - delays showing the dialog on hovering the linkIcon
@@ -129,33 +129,12 @@
 
             if (ICON_CONFIG.linkIcon) {
                 new WebsiteInjectionUtils(
-                    navigationDetails => this.getWebviewConfig(navigationDetails),
+                    webview => this.getWebviewFromPanel(webview),
                     (url, fromPanel, origin) => this.dialogTab(url, fromPanel, origin),
                     ICON_CONFIG,
                     TIMING_CONFIG
                 );
             }
-        }
-
-        /**
-         * Finds the correct configuration for showing the dialog
-         */
-        getWebviewConfig(navigationDetails) {
-            const isSubFrame = navigationDetails.frameId && navigationDetails.frameId !== 0,
-                isNonOutermostFrame = navigationDetails.frameType && navigationDetails.frameType !== 'outermost_frame';
-            if (isSubFrame || isNonOutermostFrame) return {webview: null, fromPanel: false};
-
-            // first dialog from tab or webpanel
-            let webview = document.querySelector(`webview[tab_id="${navigationDetails.tabId}"]`);
-            if (webview) return {webview, fromPanel: this.getWebviewFromPanel(webview)};
-
-            // follow-up dialog from the webpanel
-            webview = Array.from(this.webviews.values()).find(view => view.fromPanel)?.webview;
-            if (webview) return {webview, fromPanel: true};
-
-            // follow-up dialog from tab
-            const lastWebviewId = document.querySelector('.active.visible.webpageview .dialog-container:last-of-type webview')?.id;
-            return {webview: this.webviews.get(lastWebviewId)?.webview, fromPanel: false};
         }
 
         getWebviewFromPanel(webview) {
@@ -941,19 +920,22 @@
     }
 
     class WebsiteInjectionUtils {
-        constructor(getWebviewConfig, openDialog, iconConfig, timingConfig) {
+        watchedWebviews = new WeakSet();
+
+        constructor(getWebviewFromPanel, openDialog, iconConfig, timingConfig) {
+            this.getWebviewFromPanel = getWebviewFromPanel;
             this.linkInteractionConfig = JSON.stringify({
                 icon: iconConfig,
                 timing: timingConfig
             });
 
-            // inject detection of click observers
-            chrome.webNavigation.onCompleted.addListener(navigationDetails => {
-                const {webview, fromPanel} = getWebviewConfig(navigationDetails);
-                webview && this.injectCode(webview, fromPanel);
-            });
+            // Inject into webviews that already exist and keep watching for new ones.
+            // This avoids relying on webNavigation tab IDs, which do not always map
+            // reliably back to Vivaldi's DOM webview elements.
+            this.prepareOpenWebviews();
+            this.observeWebviews();
 
-            // react on demand to open a dialog
+            // React on demand to open a dialog.
             chrome.runtime.onMessage.addListener(message => {
                 if (message.url) {
                     openDialog(message.url, message.fromPanel, message.origin);
@@ -961,8 +943,58 @@
             });
         }
 
-        injectCode(webview, fromPanel) {
-            const handler = WebsiteLinkInteractionHandler.toString(),
+        prepareOpenWebviews() {
+            document.querySelectorAll('webview[tab_id]').forEach(webview => this.prepareWebview(webview));
+        }
+
+        observeWebviews() {
+            const root = document.getElementById('browser') || document.body;
+            if (!root) return;
+
+            const prepareNode = node => {
+                if (!(node instanceof Element)) return;
+
+                if (node.matches('webview[tab_id]')) {
+                    this.prepareWebview(node);
+                }
+
+                node.querySelectorAll?.('webview[tab_id]').forEach(webview => this.prepareWebview(webview));
+            };
+
+            new MutationObserver(mutations => {
+                mutations.forEach(mutation => {
+                    if (mutation.type === 'attributes') {
+                        prepareNode(mutation.target);
+                        return;
+                    }
+
+                    mutation.addedNodes.forEach(prepareNode);
+                });
+            }).observe(root, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['tab_id']
+            });
+        }
+
+        prepareWebview(webview) {
+            if (this.watchedWebviews.has(webview)) return;
+
+            this.watchedWebviews.add(webview);
+
+            // A full navigation creates a new page context, so inject again once it
+            // has finished loading. SPA/hash navigation keeps the existing handler.
+            webview.addEventListener('loadstop', () => this.injectCode(webview));
+
+            // Also try immediately so tabs that were already loaded before this mod
+            // initialized receive the handler without requiring a reload.
+            this.injectCode(webview);
+        }
+
+        injectCode(webview) {
+            const fromPanel = this.getWebviewFromPanel(webview),
+                handler = WebsiteLinkInteractionHandler.toString(),
                 instantiationCode = `
                 if (!this.dialogEventListenerSet) {
                     new (${handler})(${fromPanel}, ${this.linkInteractionConfig});
@@ -971,9 +1003,9 @@
             `;
 
             try {
-                webview.executeScript({code: instantiationCode}, result => {
+                webview.executeScript({code: instantiationCode, allFrames: true}, () => {
                     if (chrome.runtime.lastError) {
-                        // Script injection failed (e.g., on chrome:// pages or blocked by CSP)
+                        // Expected for pages/frames where script injection is not allowed.
                         console.debug('Dialog mod: Script injection failed:', chrome.runtime.lastError.message);
                     }
                 });
@@ -1035,7 +1067,12 @@
 
         #createIcon() {
             const icon = document.createElement('div');
-            icon.className = `link-icon ${this.iconConfig.linkIcon}`;
+
+            // Render the configured icon as a self-contained inline SVG so the
+            // website does not need to provide an icon font or stylesheet.
+            icon.className = 'link-icon';
+            icon.dataset.iconName = this.iconConfig.linkIcon;
+            icon.innerHTML = this.#getLinkIconSvg(this.iconConfig.linkIcon);
             icon.style.display = 'none';
 
             const getLinkCenter = () => {
@@ -1072,6 +1109,19 @@
             document.body.appendChild(this.icon);
         }
 
+        #getLinkIconSvg(iconName) {
+            const icons = {
+                'arrow-up-right':
+                    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7h-2V6.41l-9.29 9.3-1.42-1.42 9.3-9.29H14V3ZM5 5h6v2H5v12h12v-6h2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>',
+                'info-circle':
+                    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 4.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5ZM10.75 11h2.5v6h-2.5v-6Z"/></svg>',
+                'square-outline':
+                    '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/></svg>'
+            };
+
+            return icons[iconName] || icons['arrow-up-right'];
+        }
+
         #hideLinkIcon() {
             clearTimeout(this.timers.showIcon);
             this.timers.hideIcon = setTimeout(
@@ -1101,10 +1151,26 @@
             style.textContent = `
                 .link-icon {
                     position: absolute;
-                    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+                    box-sizing: border-box;
+                    width: 22px;
+                    height: 22px;
+                    padding: 3px;
+                    border: 1px solid rgba(0, 0, 0, 0.18);
+                    border-radius: 4px;
+                    background: rgba(255, 255, 255, 0.96);
+                    color: #3c4043;
+                    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.18);
                     cursor: pointer;
-                    z-index: 9999;
+                    z-index: 2147483647;
                     transition: opacity 0.2s ease;
+                }
+
+                .link-icon svg {
+                    display: block;
+                    width: 100%;
+                    height: 100%;
+                    fill: currentColor;
+                    pointer-events: none;
                 }
 
                 .link-icon:hover {
