@@ -108,7 +108,13 @@
                     const tabId = Number(this.getActiveWebview()?.tab_id);
                     webviewData = webviewValues.findLast(_data => _data.tabId === tabId);
                 }
-                webviewData && this.removeDialog(webviewData.webview.id);
+                if (!webviewData) return;
+
+                const {webview, lifetime} = webviewData;
+                webview.executeScript({code: DialogFullscreen.EXIT_SCRIPT}, results => {
+                    const failed = Boolean(chrome.runtime.lastError);
+                    if (!lifetime.signal.aborted && (failed || !results?.[0])) this.removeDialog(webview.id);
+                });
             }
         };
         constructor() {
@@ -391,6 +397,7 @@
             //#region webview properties
             webview.id = webviewId;
             webview.className = 'dialog-page-webview';
+            new DialogFullscreen(webview, lifetime);
 
             let titleFetchTimeout;
             lifetime.add(() => clearTimeout(titleFetchTimeout));
@@ -917,6 +924,101 @@
             event.stopPropagation();
             event.stopImmediatePropagation?.();
         }
+    }
+
+    class DialogFullscreen {
+        static exitInPage = function () {
+            const root = document.documentElement;
+            const active = root?.hasAttribute('data-dialog-fullscreen');
+            const justExited = Date.now() - Number(root?.getAttribute('data-dialog-fullscreen-exited')) < 300;
+            if (active) window.dispatchEvent(new Event('dialog-fullscreen-exit'));
+            return active || justExited;
+        };
+        static EXIT_SCRIPT = `(${this.exitInPage.toString()})();`;
+
+        constructor(webview, lifetime) {
+            const inject = () => {
+                const tabId = Number(webview.tab_id);
+                if (lifetime.signal.aborted || !Number.isInteger(tabId) || tabId <= 0) return;
+                // Override the methods in the player's own JavaScript world.
+                chrome.scripting.executeScript({
+                    target: {tabId}, world: 'MAIN', injectImmediately: true,
+                    func: DialogFullscreen.installInPage
+                }).catch(error => console.debug('Dialog mod: Fullscreen injection failed:', error));
+            };
+            const onCommitted = details => {
+                if (details.tabId === Number(webview.tab_id) && details.frameId === 0) inject();
+            };
+            chrome.webNavigation.onCommitted.addListener(onCommitted);
+            lifetime.add(() => chrome.webNavigation.onCommitted.removeListener(onCommitted));
+            for (const event of ['webcontentscreated', 'loadcommit', 'contentload', 'loadstop']) {
+                webview.addEventListener(event, inject, {signal: lifetime.signal});
+            }
+        }
+
+        static installInPage = function () {
+            if (window.__dialogFullscreenInstalled) return;
+            window.__dialogFullscreenInstalled = true;
+            let active = null;
+            let restore = null;
+            const style = document.createElement('style');
+            style.textContent = `[data-dialog-fullscreen-player]:popover-open {
+                position: fixed !important; inset: 0 !important;
+                width: 100% !important; height: 100% !important;
+                min-width: 0 !important; min-height: 0 !important;
+                max-width: none !important; max-height: none !important;
+                margin: 0 !important; padding: 0 !important; border: 0 !important;
+                box-sizing: border-box !important; transform: none !important;
+                background: black !important; overflow: hidden !important;
+            }`;
+            const notify = element => (element.isConnected ? element : document)
+                .dispatchEvent(new Event('fullscreenchange', {bubbles: true}));
+            const exit = () => {
+                if (!active) return Promise.resolve();
+                const element = active;
+                active = null;
+                restore();
+                restore = null;
+                document.documentElement.removeAttribute('data-dialog-fullscreen');
+                document.documentElement.setAttribute('data-dialog-fullscreen-exited', String(Date.now()));
+                notify(element);
+                return Promise.resolve();
+            };
+            Element.prototype.requestFullscreen = function () {
+                if (!this.isConnected) return Promise.reject(new TypeError('Fullscreen element is detached'));
+                if (active === this) return Promise.resolve();
+                if (active) exit();
+                if (!style.isConnected) document.documentElement.append(style);
+                const popover = this.getAttribute('popover');
+                const wasOpen = this.matches(':popover-open');
+                const reset = () => {
+                    if (!wasOpen && this.matches(':popover-open')) this.hidePopover();
+                    this.removeAttribute('data-dialog-fullscreen-player');
+                    if (popover === null) this.removeAttribute('popover');
+                    else this.setAttribute('popover', popover);
+                };
+                this.setAttribute('popover', 'manual');
+                this.setAttribute('data-dialog-fullscreen-player', '');
+                try { this.showPopover(); }
+                catch (error) { reset(); return Promise.reject(error); }
+                active = this;
+                restore = reset;
+                document.documentElement.setAttribute('data-dialog-fullscreen', '');
+                notify(this);
+                return Promise.resolve();
+            };
+            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => active});
+            // Steam checks this older boolean before deciding whether to exit.
+            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(active)});
+            document.exitFullscreen = exit;
+            window.addEventListener('dialog-fullscreen-exit', exit);
+            window.addEventListener('keydown', event => {
+                if (event.key !== 'Escape' || !active) return;
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                exit();
+            }, true);
+        };
     }
 
     class WebsiteInjectionUtils {
