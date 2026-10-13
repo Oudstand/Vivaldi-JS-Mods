@@ -4,13 +4,13 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadDialogFullscreen() {
+function loadDialogFullscreen(globals = {}) {
     const source = fs.readFileSync(path.join(__dirname, '..', 'dialog.js'), 'utf8');
     const start = source.indexOf('    class DialogFullscreen {');
     const end = source.indexOf('    class WebsiteInjectionUtils {', start);
     assert.ok(start >= 0 && end > start);
 
-    return vm.runInNewContext(source.slice(start, end) + '\nDialogFullscreen');
+    return vm.runInNewContext(source.slice(start, end) + '\nDialogFullscreen', globals);
 }
 
 test('dialog fullscreen functions survive script serialization', () => {
@@ -65,15 +65,21 @@ test('Steam can toggle using document.fullscreen instead of fullscreenElement', 
         showPopover() { this.open = true; }
         hidePopover() { this.open = false; }
         append(element) { element.isConnected = true; }
+        remove() { this.isConnected = false; }
+        getRootNode() { return document; }
     }
     const document = {
         fullscreen: false, fullscreenElement: null,
         documentElement: new Element(),
-        createElement: () => ({isConnected: false})
+        createElement: () => new Element()
     };
     const window = new EventTarget();
+    window.parent = window;
     const install = loadDialogFullscreen().installInPage;
-    new vm.Script(`(${install.toString()})();`).runInNewContext({document, window, Element, Event, console});
+    new vm.Script(`(${install.toString()})();`).runInNewContext({
+        document, window, Element, Event, console, ShadowRoot: class {},
+        MutationObserver: class { observe() {} disconnect() {} }
+    });
     const player = new Element();
     // The current Steam player checks this boolean to choose enter versus exit.
     const toggle = () => document.fullscreen ? document.exitFullscreen() : player.requestFullscreen();
@@ -84,4 +90,36 @@ test('Steam can toggle using document.fullscreen instead of fullscreenElement', 
     assert.equal(document.fullscreen, false);
     assert.equal(document.fullscreenElement, null);
     assert.equal(player.open, false);
+});
+
+test('fullscreen injection covers existing frames and later subframe navigations and stops on disposal', async () => {
+    const injections = [];
+    const listeners = new Set();
+    const chrome = {
+        scripting: {executeScript: options => { injections.push(options); return Promise.resolve(); }},
+        webNavigation: {onCommitted: {
+            addListener: listener => listeners.add(listener),
+            removeListener: listener => listeners.delete(listener)
+        }}
+    };
+    const DialogFullscreen = loadDialogFullscreen({chrome});
+    const controller = new AbortController();
+    const cleanups = [];
+    const webview = new EventTarget();
+    webview.tab_id = '42';
+    new DialogFullscreen(webview, {signal: controller.signal, add: cleanup => cleanups.push(cleanup)});
+    webview.dispatchEvent(new Event('contentload'));
+    assert.equal(injections.length, 1);
+    assert.equal(injections[0].target.tabId, 42);
+    assert.equal(injections[0].target.allFrames, true);
+    assert.equal(injections[0].world, 'MAIN');
+    for (const listener of listeners) listener({tabId: 42, frameId: 7});
+    assert.deepEqual(Array.from(injections[1].target.frameIds), [7]);
+    for (const listener of listeners) listener({tabId: 99, frameId: 0});
+    assert.equal(injections.length, 2);
+    controller.abort();
+    cleanups.forEach(cleanup => cleanup());
+    webview.dispatchEvent(new Event('loadstop'));
+    assert.equal(listeners.size, 0);
+    assert.equal(injections.length, 2);
 });

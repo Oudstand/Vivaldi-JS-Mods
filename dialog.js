@@ -937,29 +937,33 @@
         static EXIT_SCRIPT = `(${this.exitInPage.toString()})();`;
 
         constructor(webview, lifetime) {
-            const inject = () => {
+            const inject = frameId => {
                 const tabId = Number(webview.tab_id);
                 if (lifetime.signal.aborted || !Number.isInteger(tabId) || tabId <= 0) return;
                 // Override the methods in the player's own JavaScript world.
                 chrome.scripting.executeScript({
-                    target: {tabId}, world: 'MAIN', injectImmediately: true,
+                    target: Number.isInteger(frameId) ? {tabId, frameIds: [frameId]} : {tabId, allFrames: true},
+                    world: 'MAIN', injectImmediately: true,
                     func: DialogFullscreen.installInPage
                 }).catch(error => console.debug('Dialog mod: Fullscreen injection failed:', error));
             };
             const onCommitted = details => {
-                if (details.tabId === Number(webview.tab_id) && details.frameId === 0) inject();
+                if (details.tabId === Number(webview.tab_id)) inject(details.frameId);
             };
             chrome.webNavigation.onCommitted.addListener(onCommitted);
             lifetime.add(() => chrome.webNavigation.onCommitted.removeListener(onCommitted));
             for (const event of ['webcontentscreated', 'loadcommit', 'contentload', 'loadstop']) {
-                webview.addEventListener(event, inject, {signal: lifetime.signal});
+                webview.addEventListener(event, () => inject(), {signal: lifetime.signal});
             }
         }
 
         static installInPage = function () {
             if (window.__dialogFullscreenInstalled) return;
             window.__dialogFullscreenInstalled = true;
+            const messageType = 'vivaldi-dialog-fullscreen';
             let active = null;
+            let activeChild = null;
+            let session = null;
             let restore = null;
             const style = document.createElement('style');
             style.textContent = `[data-dialog-fullscreen-player]:popover-open {
@@ -970,53 +974,147 @@
                 margin: 0 !important; padding: 0 !important; border: 0 !important;
                 box-sizing: border-box !important; transform: none !important;
                 background: black !important; overflow: hidden !important;
+            }
+            /* Popovers do not match the site's native video:fullscreen rules. */
+            video[data-dialog-fullscreen-player]:popover-open {
+                object-fit: contain !important; object-position: center !important;
+                border-radius: 0 !important;
+                -webkit-mask-image: none !important; mask-image: none !important;
             }`;
             const notify = element => (element.isConnected ? element : document)
-                .dispatchEvent(new Event('fullscreenchange', {bubbles: true}));
-            const exit = () => {
+                .dispatchEvent(new Event('fullscreenchange', {bubbles: true, composed: true}));
+            const send = (target, action, sessionId, fromEscape = false) => {
+                target.postMessage({type: messageType, action, session: sessionId, fromEscape}, '*');
+            };
+            const observer = new MutationObserver(() => getActive());
+            const exit = ({fromEscape = false, notifyParent = true, notifyChild = true} = {}) => {
                 if (!active) return Promise.resolve();
-                const element = active;
-                active = null;
+                const element = active, child = activeChild, endedSession = session;
+                active = activeChild = session = null;
+                observer.disconnect();
                 restore();
                 restore = null;
                 document.documentElement.removeAttribute('data-dialog-fullscreen');
-                document.documentElement.setAttribute('data-dialog-fullscreen-exited', String(Date.now()));
+                if (fromEscape) {
+                    document.documentElement.setAttribute('data-dialog-fullscreen-exited', String(Date.now()));
+                } else {
+                    document.documentElement.removeAttribute('data-dialog-fullscreen-exited');
+                }
+                if (notifyChild && child) send(child.window, 'exit', child.session, fromEscape);
+                if (notifyParent && window.parent !== window) send(window.parent, 'exit', endedSession, fromEscape);
                 notify(element);
                 return Promise.resolve();
             };
-            Element.prototype.requestFullscreen = function () {
-                if (!this.isConnected) return Promise.reject(new TypeError('Fullscreen element is detached'));
-                if (active === this) return Promise.resolve();
+            // A removed or externally hidden popover must not leave stale API state.
+            const getActive = () => {
+                if (active && (!active.isConnected || !active.matches(':popover-open'))) exit();
+                return active;
+            };
+            const enter = (element, child = null) => {
+                if (!element.isConnected) return Promise.reject(new TypeError('Fullscreen element is detached'));
+                if (getActive() === element) {
+                    if (child) activeChild = child;
+                    return Promise.resolve();
+                }
                 if (active) exit();
-                if (!style.isConnected) document.documentElement.append(style);
-                const popover = this.getAttribute('popover');
-                const wasOpen = this.matches(':popover-open');
+                const root = element.getRootNode();
+                // Document styles cannot cross shadow boundaries.
+                (root === document ? document.documentElement : root).append(style);
+                const popover = element.getAttribute('popover');
+                const marker = element.getAttribute('data-dialog-fullscreen-player');
+                const wasOpen = element.matches(':popover-open');
+                const onToggle = () => getActive();
+                const onFrameLoad = () => exit();
                 const reset = () => {
-                    if (!wasOpen && this.matches(':popover-open')) this.hidePopover();
-                    this.removeAttribute('data-dialog-fullscreen-player');
-                    if (popover === null) this.removeAttribute('popover');
-                    else this.setAttribute('popover', popover);
+                    element.removeEventListener('toggle', onToggle);
+                    element.removeEventListener('load', onFrameLoad);
+                    if (element.matches(':popover-open')) element.hidePopover();
+                    if (marker === null) element.removeAttribute('data-dialog-fullscreen-player');
+                    else element.setAttribute('data-dialog-fullscreen-player', marker);
+                    if (popover === null) element.removeAttribute('popover');
+                    else element.setAttribute('popover', popover);
+                    style.remove();
+                    if (wasOpen && element.isConnected) element.showPopover();
                 };
-                this.setAttribute('popover', 'manual');
-                this.setAttribute('data-dialog-fullscreen-player', '');
-                try { this.showPopover(); }
-                catch (error) { reset(); return Promise.reject(error); }
-                active = this;
+                element.setAttribute('popover', 'manual');
+                element.setAttribute('data-dialog-fullscreen-player', '');
+                try {
+                    element.showPopover();
+                    if (!element.matches(':popover-open')) throw new Error('Fullscreen popover was cancelled');
+                } catch (error) {
+                    reset();
+                    return Promise.reject(error);
+                }
+                active = element;
+                activeChild = child;
+                // Sessions prevent delayed exits for a previous player closing its replacement.
+                session = `${Date.now()}:${Math.random()}`;
                 restore = reset;
+                element.addEventListener('toggle', onToggle);
+                if (child) element.addEventListener('load', onFrameLoad);
+                // Observe the document and every enclosing shadow root, including closed roots.
+                for (let observedRoot = root; observedRoot; observedRoot = observedRoot.host?.getRootNode()) {
+                    observer.observe(observedRoot, {childList: true, subtree: true, attributes: true, attributeFilter: ['popover']});
+                }
                 document.documentElement.setAttribute('data-dialog-fullscreen', '');
-                notify(this);
+                document.documentElement.removeAttribute('data-dialog-fullscreen-exited');
+                if (window.parent !== window) send(window.parent, 'enter', session);
+                notify(element);
                 return Promise.resolve();
             };
-            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => active});
+            Element.prototype.requestFullscreen = function () { return enter(this); };
+            const fullscreenElement = root => {
+                let candidate = getActive();
+                while (candidate) {
+                    const candidateRoot = candidate.getRootNode();
+                    if (candidateRoot === root) return candidate;
+                    candidate = candidateRoot.host;
+                }
+                return null;
+            };
+            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => fullscreenElement(document)});
+            Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', {
+                configurable: true, get() { return fullscreenElement(this); }
+            });
             // Steam checks this older boolean before deciding whether to exit.
-            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(active)});
-            document.exitFullscreen = exit;
-            window.addEventListener('dialog-fullscreen-exit', exit);
+            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(getActive())});
+            document.exitFullscreen = () => exit();
+
+            const findFrame = (root, source) => {
+                for (const frame of root.querySelectorAll('iframe, frame')) {
+                    if (frame.contentWindow === source) return frame;
+                }
+                for (const element of root.querySelectorAll('*')) {
+                    if (!element.shadowRoot) continue;
+                    const frame = findFrame(element.shadowRoot, source);
+                    if (frame) return frame;
+                }
+                return null;
+            };
+            window.addEventListener('message', event => {
+                const message = event.data;
+                if (message?.type !== messageType || typeof message.session !== 'string' || !event.source) return;
+                if (window.parent !== window && event.source === window.parent) {
+                    if (message.action === 'exit' && message.session === session) {
+                        exit({fromEscape: message.fromEscape === true, notifyParent: false});
+                    }
+                } else if (message.action === 'enter') {
+                    // Compare WindowProxy identities; this also works across origins.
+                    const frame = findFrame(document, event.source);
+                    if (!frame) return;
+                    enter(frame, {window: event.source, session: message.session})
+                        .catch(() => send(event.source, 'exit', message.session));
+                } else if (message.action === 'exit' && activeChild?.window === event.source && activeChild.session === message.session) {
+                    exit({fromEscape: message.fromEscape === true, notifyChild: false});
+                }
+            });
+            window.addEventListener('dialog-fullscreen-exit', () => exit({fromEscape: true}));
+            window.addEventListener('pagehide', () => exit());
             window.addEventListener('keydown', event => {
-                if (event.key !== 'Escape' || !active) return;
+                if (event.key !== 'Escape' || !getActive()) return;
                 event.preventDefault();
                 event.stopImmediatePropagation();
-                exit();
+                exit({fromEscape: true});
             }, true);
         };
     }
