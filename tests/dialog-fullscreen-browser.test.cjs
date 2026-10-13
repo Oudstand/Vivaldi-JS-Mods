@@ -73,6 +73,14 @@ async function runBrowserSuite(DialogFullscreen, childDocument) {
         return Math.abs(rect.width - innerWidth) < 1 && Math.abs(rect.height - innerHeight) < 1;
     };
     const nativeFullscreen = () => Object.getOwnPropertyDescriptor(Document.prototype, 'fullscreenElement').get.call(document);
+    // Model chrome.dom in this standalone page; production uses Vivaldi's native API.
+    const roots = new WeakMap(), attachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+        const root = attachShadow.call(this, init); roots.set(this, root); return root;
+    };
+    globalThis.chrome ||= {};
+    chrome.dom = {openOrClosedShadowRoot: element => roots.get(element) || element.shadowRoot};
+    DialogFullscreen.installController();
     DialogFullscreen.installInPage();
 
     await check('normal fullscreen toggles without changing inline styles', async () => {
@@ -175,6 +183,27 @@ async function runBrowserSuite(DialogFullscreen, childDocument) {
         const state = await command(frame.contentWindow, 'status');
         assert(state.fullscreen && document.fullscreenElement === frame, 'A delayed exit closed the replacement player');
     });
+    for (const crossOrigin of [false, true]) {
+        await check((crossOrigin ? 'cross-origin' : 'same-origin') + ' iframe in a closed shadow root expands and restores', async () => {
+            const host = makePlayer(), shadow = host.attachShadow({mode: 'closed'});
+            const nested = document.createElement('div'); shadow.append(nested);
+            const inner = nested.attachShadow({mode: 'closed'});
+            const frame = document.createElement('iframe');
+            frame.style.cssText = 'width:240px;height:130px';
+            const loaded = new Promise(resolve => frame.addEventListener('load', resolve, {once: true}));
+            if (crossOrigin) frame.src = 'data:text/html,' + encodeURIComponent(childDocument);
+            else frame.srcdoc = childDocument;
+            inner.append(frame); await loaded;
+            await command(frame.contentWindow, 'enter');
+            await until(() => document.fullscreen);
+            assert(fillsViewport(frame), 'Closed shadow iframe did not expand');
+            assert(document.fullscreenElement === host && shadow.fullscreenElement === nested && inner.fullscreenElement === frame, 'Closed iframe state was not retargeted');
+            await command(frame.contentWindow, 'escape');
+            await until(() => !document.fullscreen);
+            assert(frame.getBoundingClientRect().width < innerWidth, 'Closed iframe did not shrink');
+            assert(!host.hasAttribute('data-dialog-fullscreen-host') && !nested.hasAttribute('data-dialog-fullscreen-host'), 'Host markers leaked');
+        });
+    }
     await check('nested cross-origin frames expand and exit through every ancestor', async () => {
         const frame = await makeFrame(true, true), grandchild = frame.contentWindow.frames[0];
         await command(grandchild, 'enter'); await until(() => document.fullscreenElement === frame);
@@ -199,7 +228,8 @@ async function runBrowserSuite(DialogFullscreen, childDocument) {
     document.getElementById('results').textContent = JSON.stringify(results);
 }
 
-function childFixture(install) {
+function childFixture(controller, install) {
+    controller();
     install();
     let player = document.createElement('div');
     player.style.cssText = 'width:200px;height:100px'; document.body.append(player);
@@ -225,7 +255,8 @@ function childFixture(install) {
 test('dialog fullscreen browser regressions', {skip: !browser && 'No Chromium binary found'}, () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'dialog.js'), 'utf8');
     const classSource = source.slice(source.indexOf('    class DialogFullscreen {'), source.indexOf('    class WebsiteInjectionUtils {'));
-    const installSource = vm.runInNewContext(classSource + '\nDialogFullscreen').installInPage.toString();
+    const functions = vm.runInNewContext(classSource + '\nDialogFullscreen');
+    const installSource = functions.installController.toString() + ',' + functions.installInPage.toString();
     const childDocument = '<!doctype html><body><script>(' + childFixture.toString() + ')(' + installSource + ');</script>';
     const html = '<!doctype html><meta charset="utf-8"><body style="margin:0"><pre id="results"></pre><script>' + classSource + '\n(' + runBrowserSuite.toString() + ')(DialogFullscreen,' + JSON.stringify(childDocument).replace(/</g, '\\u003c') + ');</script>';
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dialog-fullscreen-tests-'));
@@ -240,7 +271,7 @@ test('dialog fullscreen browser regressions', {skip: !browser && 'No Chromium bi
         for (const result of results) {
             console.log((result.passed ? 'PASS ' : 'FAIL ') + result.name + (result.error ? ': ' + result.error : ''));
         }
-        assert.equal(results.length, 13);
+        assert.equal(results.length, 15);
         assert.deepEqual(results.filter(result => !result.passed), []);
     } finally { fs.rmSync(directory, {recursive: true, force: true}); }
 });

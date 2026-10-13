@@ -41,6 +41,52 @@ const http = require('node:http');
    if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));
    return result.result.value;
   };
+  // Exercise the actual navigation-header code with real hover and focus states.
+  const headerStart=source.indexOf('            //#region optionsContainer properties');
+  const headerEnd=source.indexOf('            //#endregion',headerStart);
+  if(headerStart<0||headerEnd<headerStart)throw new Error('Missing navigation header');
+  await evaluate(`(()=>{
+   const root=document.createElement('div');root.className='dialog-container';root.style.cssText='z-index:999999;pointer-events:none';
+   const dialog=document.createElement('div');dialog.className='dialog-tab';dialog.style.cssText='position:absolute;left:20px;top:20px;width:500px';
+   const header=document.createElement('div');header.style.pointerEvents='auto';dialog.append(header);
+   const outside=document.createElement('button');outside.textContent='Outside';outside.style.cssText='position:absolute;left:20px;top:90px;pointer-events:auto';root.append(dialog,outside);document.body.append(root);
+   const controller=new AbortController(),cleanup=[];
+   const host={ANIMATION_DURATIONS:{OPTIONS_FADE:30,OPTIONS_HIDE:50},showWebviewOptions(id,container){const input=document.createElement('input');input.value='Test URL';const button=document.createElement('button');button.textContent='Reload';container.append(input,button);}};
+   new Function('optionsContainer','lifetime','linkUrl','webview','webviewId','UrlUtils',${JSON.stringify(source.slice(headerStart,headerEnd))}).call(host,header,{signal:controller.signal,add:fn=>cleanup.push(fn)},'Test title',{src:'https://example.test/'},'header-test',{toDisplayText:value=>value});
+   window.__headerProbe={root,header,outside,controller,cleanup};
+  })()`);
+  const moveHeaderPointer=async(inside)=>{
+   const position=await evaluate(`(()=>{const rect=__headerProbe.${inside?'header':'outside'}.getBoundingClientRect();return {x:rect.x+rect.width/2,y:rect.y+rect.height/2};})()`);
+   await call('Input.dispatchMouseEvent',{type:'mouseMoved',...position},uiSession);
+   await new Promise(resolve=>setTimeout(resolve,120));
+  };
+  const headerState=()=>evaluate(`({input:!!__headerProbe.header.querySelector('input'),fading:__headerProbe.header.classList.contains('fade-out'),hover:__headerProbe.header.matches(':hover'),focus:__headerProbe.header.matches(':focus-within')})`);
+  try {
+   await moveHeaderPointer(true);
+   await evaluate(`__headerProbe.input=__headerProbe.header.querySelector('input');__headerProbe.input.focus()`);
+   await moveHeaderPointer(false);
+   let state=await headerState();
+   if(!state.input||!state.focus||state.hover||state.fading)throw new Error('Focused URL field hidden after mouseleave: '+JSON.stringify(state));
+   await evaluate(`__headerProbe.header.querySelector('button').focus()`);
+   await new Promise(resolve=>setTimeout(resolve,120));
+   if(!await evaluate(`__headerProbe.header.querySelector('input')===__headerProbe.input`))throw new Error('Changing focus within header replaced controls');
+   await evaluate(`__headerProbe.outside.focus()`);
+   await new Promise(resolve=>setTimeout(resolve,120));
+   state=await headerState();
+   if(state.input||state.fading)throw new Error('Header did not restore title after focusout outside hover: '+JSON.stringify(state));
+   await moveHeaderPointer(true);
+   await evaluate(`__headerProbe.header.querySelector('input').focus()`);
+   await evaluate(`__headerProbe.outside.focus()`);
+   await new Promise(resolve=>setTimeout(resolve,120));
+   state=await headerState();
+   if(!state.input||!state.hover||state.focus||state.fading)throw new Error('Hovered header hidden after focusout: '+JSON.stringify(state));
+   await moveHeaderPointer(false);
+   state=await headerState();
+   if(state.input||state.fading)throw new Error('Header did not restore title after focus and pointer left: '+JSON.stringify(state));
+   console.log('Navigation controls survive focus changes and restore title only outside hover and focus');
+  } finally {
+   await evaluate(`__headerProbe.controller.abort();__headerProbe.cleanup.forEach(fn=>fn());__headerProbe.root.remove();delete window.__headerProbe`);
+  }
   const setup=readerClass+`
 (async()=>{const style=document.createElement('style');style.textContent=${JSON.stringify(css)};document.head.append(style);const tab=await chrome.tabs.create({url:${JSON.stringify(articleURL)},active:false,windowId:vivaldiWindowId,vivExtData:JSON.stringify({panelId:'dialog-native-reader-test'})});const webview=document.createElement('webview');webview.tab_id=String(tab.id);webview.setAttribute('tab_id',String(tab.id));webview.setAttribute('parent_tab_id','0');webview.setAttribute('name','vivaldi-dialog');webview.style.cssText='width:100%;flex:1;min-height:0';const overlay=document.createElement('div');overlay.className='dialog-container is-open';overlay.style.zIndex='99999';const dialog=document.createElement('div');dialog.className='dialog-tab';dialog.style.cssText='width:80%;height:80%';const controller=new AbortController();const controls=ReaderView.createControls(webview,controller.signal);const content=document.createElement('div');content.className='dialog-page-content';content.append(controls,webview);dialog.append(content);overlay.append(dialog);document.getElementById('browser').append(overlay);window.__readerProbe={webview,tabId:tab.id,controls,controller};return tab.id;})()`;
   const tabId=await evaluate(setup);console.log('Created related tab',tabId);
@@ -69,6 +115,14 @@ const http = require('node:http');
   const state=JSON.parse(rendered);
   if(!state.text?.includes('Section 19:'))throw new Error('Native reader did not render article: '+rendered);
   console.log('Native reader rendered original article',JSON.stringify({url:state.url,title:state.title,characters:state.text.length}));
+
+  const selectionStart=source.indexOf('        async searchForSelectedText() {');
+  const selectionMethod=source.slice(selectionStart,source.indexOf('\n        /**',selectionStart));
+  await evaluate(`window.__selectionProbe=({${selectionMethod}});__selectionProbe.searchEngineUtils={defaultSearchId:'test',ready:Promise.resolve()};__selectionProbe.getActiveWebview=()=>__readerProbe.webview;__selectionProbe.dialogTabSearch=(engine,text)=>{window.__selectedReaderText=text;};__readerProbe.webview.focus()`);
+  const selectedReaderText=await evaluate(`(()=>{const paragraph=Array.from(document.querySelectorAll('#reader-article p')).find(p=>p.textContent.includes('Section 0:'));window.getSelection().selectAllChildren(paragraph);return window.getSelection().toString();})()`,readerSession);
+  await evaluate('__selectionProbe.searchForSelectedText()');
+  if(await evaluate('__selectedReaderText')!==selectedReaderText)throw new Error('Selection search lost the native reader selection');
+  console.log('Selection search reads the focused native reader');
 
   const clickNative=async(title,root='__readerProbe.controls')=>{
    const position=await evaluate(`(()=>{const button=Array.from(${root}.querySelectorAll('button')).find(button=>button.title===${JSON.stringify(title)});if(!button)throw new Error('Missing native button '+${JSON.stringify(title)});if(button.disabled)throw new Error('Native button is disabled '+${JSON.stringify(title)});const rect=button.getBoundingClientRect();return {x:rect.x+rect.width/2,y:rect.y+rect.height/2,hit:button.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2))};})()`);

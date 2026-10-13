@@ -18,7 +18,7 @@ test('dialog fullscreen functions survive script serialization', () => {
     // chrome.scripting embeds Function.toString() as a function expression.
     // Playwright's evaluate(function) normalizes method shorthand and would
     // conceal this regression, so compile the actual serialized source.
-    for (const func of [DialogFullscreen.installInPage, DialogFullscreen.exitInPage]) {
+    for (const func of [DialogFullscreen.installInPage, DialogFullscreen.installController, DialogFullscreen.exitInPage]) {
         const serialized = Function.prototype.toString.call(func);
         const roundTripped = new vm.Script(`(${serialized})`).runInNewContext();
         assert.equal(typeof roundTripped, 'function');
@@ -54,7 +54,9 @@ test('Escape exits player fullscreen before allowing the dialog to close', () =>
 });
 
 test('Steam can toggle using document.fullscreen instead of fullscreenElement', async () => {
+    const elements = new Set();
     class Element extends EventTarget {
+        constructor() { super(); elements.add(this); }
         attributes = new Map();
         isConnected = true;
         open = false;
@@ -71,13 +73,16 @@ test('Steam can toggle using document.fullscreen instead of fullscreenElement', 
     const document = {
         fullscreen: false, fullscreenElement: null,
         documentElement: new Element(),
+        querySelectorAll: () => [...elements],
+        querySelector: () => [...elements].find(element => element.getAttribute('data-dialog-fullscreen-player') === document.documentElement.getAttribute('data-dialog-fullscreen')) || null,
         createElement: () => new Element()
     };
     const window = new EventTarget();
     window.parent = window;
-    const install = loadDialogFullscreen().installInPage;
-    new vm.Script(`(${install.toString()})();`).runInNewContext({
-        document, window, Element, Event, console, ShadowRoot: class {},
+    const functions = loadDialogFullscreen();
+    const install = `(${functions.installController.toString()})();(${functions.installInPage.toString()})();`;
+    new vm.Script(install).runInNewContext({
+        document, window, Element, Event, CustomEvent: class extends Event { constructor(type, options) { super(type); this.detail = options.detail; } }, console, ShadowRoot: class {},
         MutationObserver: class { observe() {} disconnect() {} }
     });
     const player = new Element();
@@ -109,17 +114,20 @@ test('fullscreen injection covers existing frames and later subframe navigations
     webview.tab_id = '42';
     new DialogFullscreen(webview, {signal: controller.signal, add: cleanup => cleanups.push(cleanup)});
     webview.dispatchEvent(new Event('contentload'));
-    assert.equal(injections.length, 1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(injections.length, 2);
     assert.equal(injections[0].target.tabId, 42);
     assert.equal(injections[0].target.allFrames, true);
-    assert.equal(injections[0].world, 'MAIN');
+    assert.equal(injections[0].world, 'ISOLATED');
+    assert.equal(injections[1].world, 'MAIN');
     for (const listener of listeners) listener({tabId: 42, frameId: 7});
-    assert.deepEqual(Array.from(injections[1].target.frameIds), [7]);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(Array.from(injections[2].target.frameIds), [7]);
     for (const listener of listeners) listener({tabId: 99, frameId: 0});
-    assert.equal(injections.length, 2);
+    assert.equal(injections.length, 4);
     controller.abort();
     cleanups.forEach(cleanup => cleanup());
     webview.dispatchEvent(new Event('loadstop'));
     assert.equal(listeners.size, 0);
-    assert.equal(injections.length, 2);
+    assert.equal(injections.length, 4);
 });

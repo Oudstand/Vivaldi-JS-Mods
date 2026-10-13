@@ -59,7 +59,7 @@
 
         add(cleanupFn) {
             if (this.#disposed) {
-                cleanupFn();
+                this.#cleanup(cleanupFn);
                 return;
             }
 
@@ -73,8 +73,13 @@
             this.#controller.abort();
 
             for (const cleanupFn of this.#cleanupFns.splice(0)) {
-                cleanupFn();
+                this.#cleanup(cleanupFn);
             }
+        }
+
+        #cleanup(cleanupFn) {
+            try { cleanupFn(); }
+            catch (error) { console.debug('Dialog mod: Cleanup failed:', error); }
         }
     }
 
@@ -150,8 +155,29 @@
          * @returns {Promise<void>}
          */
         async searchForSelectedText() {
-            const tabs = await chrome.tabs.query({active: true});
-            vivaldi.utilities.getSelectedText(tabs[0].id, text => this.dialogTabSearch(this.searchEngineUtils.defaultSearchId, text));
+            const focusedWebview = document.activeElement?.closest('webview[tab_id]');
+            let tabId = Number(focusedWebview?.tab_id);
+            if (!Number.isInteger(tabId) || tabId <= 0) {
+                const [tab] = await chrome.tabs.query({active: true, windowId: vivaldiWindowId});
+                if (!tab) return;
+                tabId = tab.id;
+            }
+            await this.searchEngineUtils.ready;
+            let text = await vivaldi.utilities.getSelectedText(tabId);
+            const webview = focusedWebview || this.getActiveWebview();
+            if (!text && Number(webview?.tab_id) === tabId) {
+                text = await new Promise(resolve => {
+                    try {
+                        webview.executeScript({allFrames: true, code: "document.hasFocus() ? window.getSelection().toString() : ''"}, results => {
+                            const failed = Boolean(chrome.runtime.lastError);
+                            resolve(failed ? '' : results?.find(Boolean) || '');
+                        });
+                    } catch { resolve(''); }
+                });
+            }
+            if (!text?.trim()) return;
+            const engineId = this.searchEngineUtils.incognito ? this.searchEngineUtils.privateSearchId : this.searchEngineUtils.defaultSearchId;
+            await this.dialogTabSearch(engineId, text);
         }
 
         /**
@@ -166,10 +192,11 @@
 
         /**
          * Handle a potential keyboard shortcut (copy from KeyboardMachine)
-         * @param {number} id I don't know what this does, but it's an extra argument
+         * @param {number} id the window receiving the shortcut
          * @param {String} combination written in the form (CTRL+SHIFT+ALT+KEY)
          */
         keyCombo(id, combination) {
+            if (id !== vivaldiWindowId) return;
             const customShortcut = this.KEYBOARD_SHORTCUTS[combination];
             if (customShortcut) {
                 customShortcut();
@@ -276,9 +303,12 @@
             }
 
             const activeWebview = this.getActiveWebview();
+            const parent = fromPanel ? document.getElementById('browser') : activeWebview?.closest('.webpageview');
+            if (!parent) return;
             const tabId = !fromPanel && activeWebview ? Number(activeWebview.tab_id) : null;
 
             this.webviews.set(webviewId, {
+                parent,
                 divContainer: dialogContainer,
                 webview: webview,
                 fromPanel: fromPanel,
@@ -303,8 +333,9 @@
 
             //#region dialogTab properties
             dialogTab.setAttribute('class', 'dialog-tab');
-            dialogTab.style.width = 85 - 5 * this.webviews.size + '%';
-            dialogTab.style.height = 95 - 5 * this.webviews.size + '%';
+            const depth = [...this.webviews.values()].filter(data => data.parent === parent && data.divContainer.dataset.closing !== '1').length;
+            dialogTab.style.width = Math.max(60, 85 - 5 * depth) + '%';
+            dialogTab.style.height = Math.max(70, 95 - 5 * depth) + '%';
             // keep hidden until anchored start is ready
             dialogTab.style.visibility = 'hidden';
             //#endregion
@@ -333,7 +364,10 @@
                     clearTimeout(hideOptionsTimeout);
                     clearTimeout(fadeTimeout);
 
-                    if (showingOptions) return;
+                    if (showingOptions) {
+                        optionsContainer.classList.remove('fade-out');
+                        return;
+                    }
 
                     optionsContainer.classList.add('fade-out');
                     fadeTimeout = setTimeout(() => {
@@ -349,6 +383,11 @@
                     clearTimeout(hideOptionsTimeout);
                     clearTimeout(fadeTimeout);
 
+                    if (optionsContainer.matches(':hover, :focus-within')) {
+                        optionsContainer.classList.remove('fade-out');
+                        return;
+                    }
+
                     if (!showingOptions) {
                         renderTitle();
                         optionsContainer.classList.remove('showing-options');
@@ -357,11 +396,11 @@
                     }
 
                     hideOptionsTimeout = setTimeout(() => {
-                        if (!showingOptions) return;
+                        if (!showingOptions || optionsContainer.matches(':hover, :focus-within')) return;
 
                         optionsContainer.classList.add('fade-out');
                         fadeTimeout = setTimeout(() => {
-                            if (lifetime.signal.aborted) return;
+                            if (lifetime.signal.aborted || optionsContainer.matches(':hover, :focus-within')) return;
                             renderTitle();
                             optionsContainer.classList.remove('showing-options');
                             optionsContainer.classList.remove('fade-out');
@@ -379,6 +418,10 @@
 
             optionsContainer.addEventListener('mouseenter', showOptions, {signal: lifetime.signal});
             optionsContainer.addEventListener('mouseleave', showTitle, {signal: lifetime.signal});
+            optionsContainer.addEventListener('focusin', showOptions, {signal: lifetime.signal});
+            optionsContainer.addEventListener('focusout', event => {
+                if (!optionsContainer.contains(event.relatedTarget)) showTitle();
+            }, {signal: lifetime.signal});
             //#endregion
 
             //#region webview properties
@@ -391,7 +434,8 @@
 
             webview.addEventListener(
                 'loadstart',
-                () => {
+                event => {
+                    if (event.isTopLevel === false) return;
                     webview.style.backgroundColor = 'var(--colorBorder)';
                     progressBar.start();
                     setTitleText(webview.src || linkUrl);
@@ -406,8 +450,10 @@
             webview.addEventListener(
                 'loadcommit',
                 event => {
+                    if (event.isTopLevel === false) return;
                     setTitleText(webview.src || linkUrl);
                     dialogTab.querySelector('.reader-view-toggle')?.setAttribute('aria-pressed', String(ReaderView.isReaderUrl(event.url || webview.src)));
+                    this.updateHistoryButtons(webview);
                 },
                 {signal: lifetime.signal}
             );
@@ -415,6 +461,7 @@
                 'loadstop',
                 () => {
                     progressBar.clear(true);
+                    this.updateHistoryButtons(webview);
 
                     const expectedSrc = webview.src;
                     clearTimeout(titleFetchTimeout);
@@ -494,13 +541,13 @@
             dialogContainer.appendChild(dialogTab);
 
             this.prepareDialogWebview(webview, webviewId, linkUrl, lifetime).then(success => {
-                if (lifetime.signal.aborted || !success) {
+                if (lifetime.signal.aborted || !success || !parent.isConnected) {
                     this.cleanupDialog(webviewId);
                     this.webviews.delete(webviewId);
                     return;
                 }
 
-                (fromPanel ? document.querySelector('#browser') : document.querySelector('.active.visible.webpageview')).appendChild(dialogContainer);
+                parent.appendChild(dialogContainer);
 
                 requestAnimationFrame(() => {
                     if (lifetime.signal.aborted) return;
@@ -621,6 +668,8 @@
 
                 if (UI_CONFIG.showUrlInput) {
                     input = document.createElement('input');
+                    input.type = 'search';
+                    input.spellcheck = false;
                     input.value = webview.src;
                     input.id = inputId;
                     input.setAttribute('class', 'dialog-input');
@@ -639,8 +688,8 @@
 
                 const fragment = document.createDocumentFragment(),
                     buttons = [
-                        {content: this.iconUtils.back, action: () => this.navigateWebviewHistory(webview, 'back'), tooltip: TOOLTIP_CONFIG.back},
-                        {content: this.iconUtils.forward, action: () => this.navigateWebviewHistory(webview, 'forward'), tooltip: TOOLTIP_CONFIG.forward},
+                        {content: this.iconUtils.back, action: () => this.navigateWebviewHistory(webview, 'back'), cls: 'history-back', tooltip: TOOLTIP_CONFIG.back},
+                        {content: this.iconUtils.forward, action: () => this.navigateWebviewHistory(webview, 'forward'), cls: 'history-forward', tooltip: TOOLTIP_CONFIG.forward},
                         {content: this.iconUtils.reload, action: () => webview.reload(), tooltip: TOOLTIP_CONFIG.reload},
                         {
                             content: this.iconUtils.readerView,
@@ -669,7 +718,15 @@
                 if (input) fragment.appendChild(input);
 
                 thisElement.append(fragment);
+                this.updateHistoryButtons(webview);
             }
+        }
+
+        updateHistoryButtons(webview) {
+            const data = this.webviews.get(webview.id);
+            if (!data || data.lifetime.signal.aborted) return;
+            data.divContainer.querySelector('.history-back')?.toggleAttribute('disabled', !webview.canGoBack());
+            data.divContainer.querySelector('.history-forward')?.toggleAttribute('disabled', !webview.canGoForward());
         }
 
         /**
@@ -760,7 +817,9 @@
         static async normalizeOrSearch(input, searchEngineUtils) {
             if (this.isValid(input)) return input.trim();
 
-            const searchRequest = await vivaldi.searchEngines.getSearchRequest(searchEngineUtils.defaultSearchId, input);
+            await searchEngineUtils.ready;
+            const engineId = searchEngineUtils.incognito ? searchEngineUtils.privateSearchId : searchEngineUtils.defaultSearchId;
+            const searchRequest = await vivaldi.searchEngines.getSearchRequest(engineId, input);
             return searchRequest.url;
         }
 
@@ -919,15 +978,18 @@
         static EXIT_SCRIPT = `(${this.exitInPage.toString()})();`;
 
         constructor(webview, lifetime) {
-            const inject = frameId => {
+            const inject = async frameId => {
                 const tabId = Number(webview.tab_id);
                 if (lifetime.signal.aborted || !Number.isInteger(tabId) || tabId <= 0) return;
-                // Override the methods in the player's own JavaScript world.
-                chrome.scripting.executeScript({
-                    target: Number.isInteger(frameId) ? {tabId, frameIds: [frameId]} : {tabId, allFrames: true},
-                    world: 'MAIN', injectImmediately: true,
-                    func: DialogFullscreen.installInPage
-                }).catch(error => console.debug('Dialog mod: Fullscreen injection failed:', error));
+                const target = Number.isInteger(frameId) ? {tabId, frameIds: [frameId]} : {tabId, allFrames: true};
+                try {
+                    // DOM work stays in the extension world, where closed shadow roots are accessible.
+                    await chrome.scripting.executeScript({target, world: 'ISOLATED', injectImmediately: true,
+                        func: DialogFullscreen.installController});
+                    if (lifetime.signal.aborted) return;
+                    await chrome.scripting.executeScript({target, world: 'MAIN', injectImmediately: true,
+                        func: DialogFullscreen.installInPage});
+                } catch (error) { console.debug('Dialog mod: Fullscreen injection failed:', error); }
             };
             const onCommitted = details => {
                 if (details.tabId === Number(webview.tab_id)) inject(details.frameId);
@@ -942,6 +1004,45 @@
         static installInPage = function () {
             if (window.__dialogFullscreenInstalled) return;
             window.__dialogFullscreenInstalled = true;
+            let sequence = 0;
+            const pending = new Map();
+            window.addEventListener('dialog-fullscreen-result', event => {
+                const result = event.detail, request = pending.get(result?.id);
+                if (!request) return;
+                pending.delete(result.id);
+                if (result.error) request.reject(new TypeError(result.error));
+                else request.resolve();
+            });
+            const request = (action, element) => new Promise((resolve, reject) => {
+                const id = `dialog-${++sequence}`;
+                const marker = element?.getAttribute('data-dialog-fullscreen-request');
+                pending.set(id, {resolve, reject});
+                element?.setAttribute('data-dialog-fullscreen-request', id);
+                try { window.dispatchEvent(new CustomEvent('dialog-fullscreen-request', {detail: {id, action}})); }
+                finally {
+                    if (element) {
+                        if (marker === null) element.removeAttribute('data-dialog-fullscreen-request');
+                        else element.setAttribute('data-dialog-fullscreen-request', marker);
+                    }
+                }
+            });
+            Element.prototype.requestFullscreen = function () { return request('enter', this); };
+            const fullscreenElement = root => {
+                const session = document.documentElement.getAttribute('data-dialog-fullscreen');
+                if (!session) return null;
+                return root.querySelector(`[data-dialog-fullscreen-player="${session}"], [data-dialog-fullscreen-host="${session}"]`);
+            };
+            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => fullscreenElement(document)});
+            Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', {
+                configurable: true, get() { return fullscreenElement(this); }
+            });
+            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(fullscreenElement(document))});
+            document.exitFullscreen = () => request('exit');
+        };
+
+        static installController = function () {
+            if (window.__dialogFullscreenControllerInstalled) return;
+            window.__dialogFullscreenControllerInstalled = true;
             const messageType = 'vivaldi-dialog-fullscreen';
             let active = null;
             let activeChild = null;
@@ -1005,6 +1106,12 @@
                 const popover = element.getAttribute('popover');
                 const marker = element.getAttribute('data-dialog-fullscreen-player');
                 const wasOpen = element.matches(':popover-open');
+                const nextSession = `${Date.now()}:${Math.random()}`;
+                const hosts = [];
+                for (let host = root.host; host; host = host.getRootNode().host) {
+                    hosts.push([host, host.getAttribute('data-dialog-fullscreen-host')]);
+                    host.setAttribute('data-dialog-fullscreen-host', nextSession);
+                }
                 const onToggle = () => getActive();
                 const onFrameLoad = () => exit();
                 const reset = () => {
@@ -1016,10 +1123,14 @@
                     if (popover === null) element.removeAttribute('popover');
                     else element.setAttribute('popover', popover);
                     style.remove();
+                    for (const [host, value] of hosts) {
+                        if (value === null) host.removeAttribute('data-dialog-fullscreen-host');
+                        else host.setAttribute('data-dialog-fullscreen-host', value);
+                    }
                     if (wasOpen && element.isConnected) element.showPopover();
                 };
                 element.setAttribute('popover', 'manual');
-                element.setAttribute('data-dialog-fullscreen-player', '');
+                element.setAttribute('data-dialog-fullscreen-player', nextSession);
                 try {
                     element.showPopover();
                     if (!element.matches(':popover-open')) throw new Error('Fullscreen popover was cancelled');
@@ -1030,7 +1141,7 @@
                 active = element;
                 activeChild = child;
                 // Sessions prevent delayed exits for a previous player closing its replacement.
-                session = `${Date.now()}:${Math.random()}`;
+                session = nextSession;
                 restore = reset;
                 element.addEventListener('toggle', onToggle);
                 if (child) element.addEventListener('load', onFrameLoad);
@@ -1038,41 +1149,34 @@
                 for (let observedRoot = root; observedRoot; observedRoot = observedRoot.host?.getRootNode()) {
                     observer.observe(observedRoot, {childList: true, subtree: true, attributes: true, attributeFilter: ['popover']});
                 }
-                document.documentElement.setAttribute('data-dialog-fullscreen', '');
+                document.documentElement.setAttribute('data-dialog-fullscreen', session);
                 document.documentElement.removeAttribute('data-dialog-fullscreen-exited');
                 if (window.parent !== window) send(window.parent, 'enter', session);
                 notify(element);
                 return Promise.resolve();
             };
-            Element.prototype.requestFullscreen = function () { return enter(this); };
-            const fullscreenElement = root => {
-                let candidate = getActive();
-                while (candidate) {
-                    const candidateRoot = candidate.getRootNode();
-                    if (candidateRoot === root) return candidate;
-                    candidate = candidateRoot.host;
-                }
-                return null;
-            };
-            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => fullscreenElement(document)});
-            Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', {
-                configurable: true, get() { return fullscreenElement(this); }
-            });
-            // Steam checks this older boolean before deciding whether to exit.
-            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(getActive())});
-            document.exitFullscreen = () => exit();
-
-            const findFrame = (root, source) => {
-                for (const frame of root.querySelectorAll('iframe, frame')) {
-                    if (frame.contentWindow === source) return frame;
-                }
+            const shadowRoot = element => globalThis.chrome?.dom?.openOrClosedShadowRoot(element) || element.shadowRoot;
+            const findElement = (root, matches) => {
                 for (const element of root.querySelectorAll('*')) {
-                    if (!element.shadowRoot) continue;
-                    const frame = findFrame(element.shadowRoot, source);
-                    if (frame) return frame;
+                    if (matches(element)) return element;
+                    const shadow = shadowRoot(element);
+                    const nested = shadow && findElement(shadow, matches);
+                    if (nested) return nested;
                 }
                 return null;
             };
+            window.addEventListener('dialog-fullscreen-request', event => {
+                const {id, action} = event.detail || {};
+                if (typeof id !== 'string' || !['enter', 'exit'].includes(action)) return;
+                const element = action === 'enter' && findElement(document,
+                    candidate => candidate.getAttribute('data-dialog-fullscreen-request') === id);
+                const operation = action === 'exit' ? exit() : element ? enter(element) : Promise.reject(new TypeError('Fullscreen element is detached'));
+                operation.then(() => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id}})),
+                    error => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id, error: error.message}})));
+            });
+
+            const findFrame = source => findElement(document, element =>
+                ['IFRAME', 'FRAME'].includes(element.tagName) && element.contentWindow === source);
             window.addEventListener('message', event => {
                 const message = event.data;
                 if (message?.type !== messageType || typeof message.session !== 'string' || !event.source) return;
@@ -1082,7 +1186,7 @@
                     }
                 } else if (message.action === 'enter') {
                     // Compare WindowProxy identities; this also works across origins.
-                    const frame = findFrame(document, event.source);
+                    const frame = findFrame(event.source);
                     if (!frame) return;
                     enter(frame, {window: event.source, session: message.session})
                         .catch(() => send(event.source, 'exit', message.session));
@@ -1367,134 +1471,86 @@
      * Utility class for adding and updating context menu items
      */
     class SearchEngineUtils {
-        /**
-         * Constructor for SearchEngineUtils
-         * @param {Function} openLinkCallback - Callback for opening links
-         * @param {Function} searchCallback - Callback for searching
-         * @param {Object} [config={}] - Configuration options
-         * @param {string} [config.menuPrefix] - Prefix for the context menu item
-         * @param {string} [config.linkMenuTitle] - Titel for the link menu
-         * @param {string} [config.searchMenuTitle] - title for the search menu
-         * @param {string} [config.selectSearchMenuTitle] - title for the select search menu
-         */
+        static #sharedKey = Symbol.for('dialog.mod.searchMenus');
+
         constructor(openLinkCallback, searchCallback, config = {}) {
             this.openLinkCallback = openLinkCallback;
             this.searchCallback = searchCallback;
-
-            this.menuPrefix = config.menuPrefix;
-            this.linkMenuTitle = config.linkMenuTitle;
-            this.searchMenuTitle = config.searchMenuTitle;
-            this.selectSearchMenuTitle = config.selectSearchMenuTitle;
-
-            this.createdContextMenuMap = new Map();
-            this.searchEngineCollection = [];
-            this.defaultSearchId = null;
-            this.privateSearchId = null;
-
-            // Cache static IDs for frequent access
-            this.LINK_ID = 'dialog-tab-link';
-            this.SEARCH_ID = 'search-dialog-tab';
-            this.SELECT_SEARCH_ID = 'select-search-dialog-tab';
-
-            this.#initialize();
+            this.incognito = chrome.extension.inIncognitoContext;
+            const core = chrome.extension.getViews().find(view => view.location.href === chrome.runtime.getURL('main.html'));
+            if (!core) throw new Error('Vivaldi shared context unavailable');
+            this.shared = core[SearchEngineUtils.#sharedKey] ||= SearchEngineUtils.#createShared(core, config);
+            this.shared.clients.set(vivaldiWindowId, this);
+            window.addEventListener('unload', () => {
+                if (this.shared.clients.get(vivaldiWindowId) === this) this.shared.clients.delete(vivaldiWindowId);
+            }, {once: true});
         }
 
-        /**
-         * Initializes the context menu and listeners
-         * @returns {Promise<void>}
-         */
-        async #initialize() {
-            // Create context menu items
-            this.#createContextMenuOption();
+        get ready() { return this.shared.pending; }
+        get defaultSearchId() { return this.shared.defaultSearchId; }
+        get privateSearchId() { return this.shared.privateSearchId; }
 
-            // Initialize search engines and context menus
-            this.#updateSearchEnginesAndContextMenu();
-
-            // Update context menus when search engines change
-            vivaldi.searchEngines.onTemplateUrlsChanged.addListener(() => {
-                this.#removeContextMenuSelectSearch();
-                this.#updateSearchEnginesAndContextMenu();
+        static #createShared(core, config) {
+            const state = {clients: new Map(), menus: new Map(), pending: Promise.resolve()};
+            const menuApi = core.chrome.contextMenus;
+            const menuCall = (method, ...args) => new Promise((resolve, reject) => {
+                menuApi[method](...args, () => {
+                    const error = core.chrome.runtime.lastError;
+                    if (error) reject(new Error(error.message));
+                    else resolve();
+                });
             });
-        }
-
-        /**
-         * Creates context menu items to open a dialog tab
-         */
-        #createContextMenuOption() {
-            chrome.contextMenus.create({
-                id: this.LINK_ID,
-                title: this.#formatMenuTitle(this.linkMenuTitle),
-                contexts: ['link']
-            });
-            chrome.contextMenus.create({
-                id: this.SEARCH_ID,
-                title: this.#formatMenuTitle(this.searchMenuTitle),
-                contexts: ['selection']
-            });
-            chrome.contextMenus.create({
-                id: this.SELECT_SEARCH_ID,
-                title: this.#formatMenuTitle(this.selectSearchMenuTitle),
-                contexts: ['selection']
-            });
-
-            chrome.contextMenus.onClicked.addListener(itemInfo => {
-                const {menuItemId, parentMenuItemId, linkUrl, selectionText} = itemInfo;
-
-                if (menuItemId === this.LINK_ID) {
-                    this.openLinkCallback(linkUrl);
-                } else if (menuItemId === this.SEARCH_ID) {
-                    const engineId = window.incognito ? this.privateSearchId : this.defaultSearchId;
-                    this.searchCallback(engineId, selectionText);
-                } else if (parentMenuItemId === this.SELECT_SEARCH_ID) {
-                    const engineId = menuItemId.substr(parentMenuItemId.length);
-                    this.searchCallback(engineId, selectionText);
+            const format = title => config.menuPrefix ? `${config.menuPrefix} ${title}` : title;
+            const update = () => state.pending = state.pending.then(async () => {
+                const engines = await core.vivaldi.searchEngines.getTemplateUrls();
+                state.defaultSearchId = engines.defaultSearch;
+                state.privateSearchId = engines.defaultPrivate;
+                const desired = new Map([
+                    ['dialog-tab-link', {title: format(config.linkMenuTitle), contexts: ['link']}],
+                    ['search-dialog-tab', {title: format(config.searchMenuTitle), contexts: ['selection']}],
+                    ['select-search-dialog-tab', {title: format(config.selectSearchMenuTitle), contexts: ['selection']}],
+                    ...engines.templateUrls.map(engine => ['select-search-dialog-tab' + engine.guid,
+                        {parentId: 'select-search-dialog-tab', title: engine.name, contexts: ['selection']}])
+                ]);
+                for (const id of state.menus.keys()) {
+                    if (!desired.has(id)) {
+                        await menuCall('remove', id);
+                        state.menus.delete(id);
+                    }
                 }
-            });
-        }
-
-        #formatMenuTitle(title) {
-            return this.menuPrefix ? `${this.menuPrefix} ${title}` : title;
-        }
-
-        /**
-         * Updates the search engines and context menu
-         */
-        async #updateSearchEnginesAndContextMenu() {
-            const searchEngines = await vivaldi.searchEngines.getTemplateUrls();
-            this.searchEngineCollection = searchEngines.templateUrls;
-            this.defaultSearchId = searchEngines.defaultSearch;
-            this.privateSearchId = searchEngines.defaultPrivate;
-
-            this.#createContextMenuSelectSearch();
-        }
-
-        /**
-         * Removes sub-context menu items for select search engine menu item
-         */
-        #removeContextMenuSelectSearch() {
-            this.createdContextMenuMap.forEach((_, engineId) => {
-                const menuId = this.SELECT_SEARCH_ID + engineId;
-                chrome.contextMenus.remove(menuId);
-            });
-
-            this.createdContextMenuMap.clear();
-        }
-
-        /**
-         * Creates sub-context menu items for select search engine menu item
-         */
-        #createContextMenuSelectSearch() {
-            this.searchEngineCollection.forEach(engine => {
-                if (!this.createdContextMenuMap.has(engine.guid)) {
-                    chrome.contextMenus.create({
-                        id: this.SELECT_SEARCH_ID + engine.guid,
-                        parentId: this.SELECT_SEARCH_ID,
-                        title: engine.name,
-                        contexts: ['selection']
-                    });
-                    this.createdContextMenuMap.set(engine.guid, true);
+                for (const [id, properties] of desired) {
+                    const signature = JSON.stringify(properties);
+                    if (!state.menus.has(id)) {
+                        // Entries can outlive a UI reload; adopt them before trying to create new ones.
+                        try { await menuCall('update', id, properties); }
+                        catch { await menuCall('create', {id, ...properties}); }
+                    }
+                    else if (state.menus.get(id) !== signature) await menuCall('update', id, properties);
+                    state.menus.set(id, signature);
                 }
+            }).catch(error => console.debug('Dialog mod: Failed to update search menus:', error));
+
+            menuApi.onClicked.addListener((info, tab) => {
+                const dispatch = windowId => {
+                    const client = state.clients.get(windowId);
+                    Promise.resolve(client?.handleMenuClick(info)).catch(error => console.debug('Dialog mod: Menu action failed:', error));
+                };
+                if (tab?.windowId !== undefined) dispatch(tab.windowId);
+                else core.chrome.windows.getLastFocused(focused => dispatch(focused.id));
             });
+            core.vivaldi.searchEngines.onTemplateUrlsChanged.addListener(update);
+            update();
+            return state;
+        }
+
+        handleMenuClick({menuItemId, parentMenuItemId, linkUrl, selectionText}) {
+            if (menuItemId === 'dialog-tab-link') return this.openLinkCallback(linkUrl);
+            if (menuItemId === 'search-dialog-tab') {
+                return this.searchCallback(this.incognito ? this.privateSearchId : this.defaultSearchId, selectionText);
+            }
+            if (parentMenuItemId === 'select-search-dialog-tab') {
+                return this.searchCallback(menuItemId.slice(parentMenuItemId.length), selectionText);
+            }
         }
     }
 
@@ -1683,6 +1739,7 @@
         }
 
         start() {
+            clearTimeout(this.clearTimeout);
             this.element.style.visibility = 'visible';
             this.element.classList.remove('is-complete');
             this.progress = 0;
