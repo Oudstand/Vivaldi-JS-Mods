@@ -10,6 +10,10 @@ Diese Mods bestehen aus zwei Teilen:
 Das Repo wird unter Linux **und** Windows verwendet; es gibt für jede Plattform
 einen eigenen Patch-Workflow.
 
+`automate-bookmark-bar.js` ergänzt `CSS/automate-bookmark-bar.css`: Der Helfer
+verhindert einen hängen gebliebenen Hover-Zustand beim Wechsel in eine Webseite.
+Für diese Korrektur muss neben dem CSS auch der JS-Patch erneut angewendet werden.
+
 ## Ordnerstruktur
 
 ```
