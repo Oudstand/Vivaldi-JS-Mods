@@ -1,7 +1,7 @@
 /*
  * Domain Button & Title in Address Bar
  * Based on work by @aminought (https://forum.vivaldi.net/topic/96072/address-bar-like-in-yandex-browser)
- * Refactored & Fixed for Vivaldi Fullscreen
+ * Uses native tab metadata and restores its UI when the address bar is rebuilt
  */
 (function domain_title_bar() {
     'use strict';
@@ -20,10 +20,6 @@
         .UrlFragments:has(.PageTitle) {
             display: flex;
             width: 100%;
-        }
-
-        .UrlBar-UrlObfuscationWarning {
-            display: none;
         }
 
         .DomainButton {
@@ -56,7 +52,7 @@
             white-space: nowrap;
         }
 
-        .DomainText:hover:hover {
+        .DomainText:hover {
           max-width: unset;
         }
 
@@ -83,291 +79,238 @@
     `;
 
     class DomainTitleBar {
-        #elements = {};
-        urlFieldMutationObserver = null;
-        titleMutationObserver = null;
-        uiObserver = null;
+        #tab = null;
+        #url = '';
+        #info = {domain: '', target: null};
+        #version = 0;
+        #frame = null;
+        #disposed = false;
+        #controller = new AbortController();
+        #listeners = [];
+        #buttons = new WeakSet();
+        #extensions = new Map();
+        #observer;
+        #style;
+        #tooltipArea = null;
+        #tooltipCleanup = null;
 
         constructor() {
-            this.#addStyle();
-            this.uiObserver = this.#createUiObserver();
-            this.#setupFeatures();
-        }
+            this.#style = document.createElement('style');
+            this.#style.textContent = STYLE;
+            document.head.appendChild(this.#style);
 
-        #setupFeatures() {
-            this.urlFieldMutationObserver?.disconnect();
-            this.titleMutationObserver?.disconnect();
-
-            this.#placeDomainButton();
-            this.#placePageTitle();
-
-            this.urlFieldMutationObserver = this.#createUrlFieldMutationObserver();
-            this.titleMutationObserver = this.#createTitleMutationObserver();
-        }
-
-        // listeners
-
-        #createUrlFieldMutationObserver() {
-            const urlFieldMutationObserver = new MutationObserver(() => {
-                this.#placeDomainButton();
-                this.#placePageTitle();
+            this.#listen(chrome.tabs.onActivated, ({tabId, windowId}) => {
+                if (windowId !== vivaldiWindowId) return;
+                this.#setTab({id: tabId});
+                this.#refresh(tabId);
             });
-            if (this.#urlFieldInput) {
-                urlFieldMutationObserver.observe(this.#urlFieldInput, {
-                    attributes: true,
-                    attributeFilter: ['value']
-                });
-            }
-            return urlFieldMutationObserver;
-        }
-
-        #createTitleMutationObserver() {
-            const titleMutationObserver = new MutationObserver(() => {
-                this.#placePageTitle();
+            this.#listen(chrome.tabs.onUpdated, (tabId, changes, tab) => {
+                if (tab.windowId !== vivaldiWindowId || (this.#tab ? tabId !== this.#tab.id : !tab.active)) return;
+                if (['url', 'pendingUrl', 'title', 'status'].some(key => key in changes)) this.#setTab(tab);
             });
-            if (this.#title) {
-                titleMutationObserver.observe(this.#title, {
-                    childList: true,
-                    subtree: true
-                });
-            }
-            return titleMutationObserver;
-        }
-
-        #createUiObserver() {
-            const uiObserver = new MutationObserver(mutations => {
-                // Check if AddressBar exists but our Button is missing (e.g. after Fullscreen toggle)
-                if (this.#urlBarAddressField && !this.#domainButton) {
-                    this.#setupFeatures();
+            this.#listen(chrome.tabs.onRemoved, tabId => {
+                if (tabId === this.#tab?.id) {
+                    this.#setTab(null);
+                    this.#refresh();
+                }
+            });
+            this.#listen(chrome.tabs.onReplaced, (addedId, removedId) => {
+                if (removedId === this.#tab?.id) {
+                    this.#setTab({id: addedId});
+                    this.#refresh(addedId);
                 }
             });
 
-            if (this.#browser) {
-                uiObserver.observe(this.#browser, {attributes: true, attributeFilter: ['class']});
+            const selector = '.UrlBar-AddressField, .UrlBar-UrlFieldWrapper, .UrlFragment-Wrapper, .DomainButton, .DomainText, .PageTitle';
+            this.#observer = new MutationObserver(mutations => {
+                if (mutations.some(mutation => [...mutation.addedNodes, ...mutation.removedNodes].some(node =>
+                    node.nodeType === Node.ELEMENT_NODE && (node.matches(selector) || node.querySelector(selector))))) {
+                    this.#scheduleRender();
+                }
+            });
+            this.#observer.observe(document.getElementById('browser'), {childList: true, subtree: true});
+            addEventListener('unload', () => this.destroy(), {once: true, signal: this.#controller.signal});
+            this.#refresh();
+        }
+
+        #listen(event, handler) {
+            event.addListener(handler);
+            this.#listeners.push([event, handler]);
+        }
+
+        async #refresh(tabId) {
+            const version = ++this.#version;
+            try {
+                const tab = tabId === undefined ? (await chrome.tabs.query({active: true, windowId: vivaldiWindowId}))[0] : await chrome.tabs.get(tabId);
+                if (!this.#disposed && version === this.#version) this.#setTab(tab);
+            } catch (error) {
+                if (!this.#disposed && version === this.#version) {
+                    this.#setTab(null);
+                    console.debug('Domain title bar: Failed to read active tab:', error);
+                }
             }
-            return uiObserver;
         }
 
-        #addDomainButtonListener() {
-            this.#domainButton.addEventListener(
-                'click',
-                async event => {
-                    event.stopPropagation();
-                    const domainInfo = await this.#getDomainInfo();
-                    if (!domainInfo.clickable) return;
+        #setTab(tab) {
+            const version = ++this.#version;
+            this.#tab = tab || null;
+            this.#url = tab?.pendingUrl || tab?.url || '';
+            this.#info = DomainTitleBar.getUrlInfo(this.#url);
+            this.#scheduleRender();
+            if (!this.#info.extensionId) return;
 
-                    const prefix = this.#calculateDomainPrefix(domainInfo.type);
-                    this.#activeWebview.setAttribute('src', prefix + domainInfo.domain);
-                },
-                true
-            );
+            const id = this.#info.extensionId;
+            if (!this.#extensions.has(id)) {
+                this.#extensions.set(id, chrome.management.get(id).then(extension => extension.name).catch(() => 'Extension'));
+            }
+            this.#extensions.get(id).then(name => {
+                if (this.#disposed || version !== this.#version) return;
+                this.#info.domain = name;
+                this.#scheduleRender();
+            });
         }
 
-        // builders
-
-        #createStyle() {
-            const style = document.createElement('style');
-            style.innerHTML = STYLE;
-            return style;
+        static getUrlInfo(raw) {
+            try {
+                const url = new URL(raw.replace(/^vivaldi:([^/])/, 'vivaldi://$1'));
+                switch (url.protocol) {
+                    case 'http:':
+                    case 'https:':
+                        return {domain: url.host, target: url.origin + '/'};
+                    case 'vivaldi:':
+                    case 'chrome:':
+                        return {domain: 'vivaldi:' + url.host, target: url.href};
+                    case 'about:':
+                        return {domain: url.href, target: url.href};
+                    case 'file:':
+                        return {domain: 'file', target: null};
+                    case 'chrome-extension:':
+                        return {domain: 'Extension', target: null, extensionId: url.hostname};
+                    default:
+                        return {domain: url.protocol.slice(0, -1), target: null};
+                }
+            } catch {
+                return {domain: '', target: null};
+            }
         }
 
-        #createDomainButton(domainInfo) {
-            const domainButton = document.createElement('button');
-            domainButton.className = 'DomainButton';
-
-            const domainText = this.#createDomainText(domainInfo.domain);
-            domainButton.appendChild(domainText);
-
-            this.#urlBarAddressField.insertBefore(domainButton, this.#urlBarUrlFieldWrapper);
-            this.#addDomainButtonListener();
+        #scheduleRender() {
+            if (this.#disposed || this.#frame !== null) return;
+            this.#frame = requestAnimationFrame(() => {
+                this.#frame = null;
+                this.#render();
+            });
         }
 
-        #createDomainText(domain) {
-            const domainText = document.createElement('div');
-            domainText.className = 'UrlFragment--Lowlight DomainText';
-            domainText.innerText = this.#getDisplayDomain(domain);
-            return domainText;
-        }
-
-        #createPageTitle() {
-            if (this.#pageTitle) return;
-
-            if (!this.#urlFragmentWrapper) {
-                setTimeout(this.#createPageTitle.bind(this), 50);
+        #render() {
+            if (this.#disposed) return;
+            const field = document.querySelector('#browser .UrlBar-AddressField');
+            if (!field) {
+                this.#setTitleTooltip(null, '');
                 return;
             }
 
-            const pageTitle = document.createElement('div');
-            pageTitle.className = 'UrlFragment--Highlight PageTitle';
-            pageTitle.innerText = this.#getTitle();
-
-            this.#urlFragmentWrapper.appendChild(pageTitle);
-        }
-
-        // actions
-
-        #addStyle() {
-            this.#head.appendChild(this.#createStyle());
-        }
-
-        async #placeDomainButton() {
-            const domainInfo = await this.#getDomainInfo();
-            if (!this.#urlBarAddressField) return;
-
-            if (this.#domainText) {
-                this.#domainText.innerText = this.#getDisplayDomain(domainInfo.domain);
-            } else {
-                this.#createDomainButton(domainInfo);
+            let button = field.querySelector('.DomainButton');
+            if (!button) {
+                button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'DomainButton';
+                field.insertBefore(button, field.querySelector('.UrlBar-UrlFieldWrapper'));
             }
-        }
-
-        #placePageTitle() {
-            if (!this.#pageTitle) {
-                this.#createPageTitle();
-            } else {
-                this.#pageTitle.innerText = this.#getTitle();
+            if (!this.#buttons.has(button)) {
+                this.#buttons.add(button);
+                button.addEventListener('click', event => {
+                    event.stopPropagation();
+                    const tabId = Number(button.dataset.tabId), target = button.dataset.target;
+                    if (!target || tabId !== this.#tab?.id || target !== this.#info.target) return;
+                    chrome.tabs.update(tabId, {url: target}).catch(error => console.debug('Domain title bar: Navigation failed:', error));
+                }, {signal: this.#controller.signal});
             }
-        }
-
-        // helpers
-
-        #getDisplayDomain(domain) {
-            return domain.startsWith('www.') ? domain.replace('www.', '') : domain;
-        }
-
-        #getTitle() {
-            if (!this.#title) return '';
-
-            let title = this.#title.innerText;
-            if (title === 'Vivaldi' && this.#activeWebview) {
-                title = this.#parseTitleFromUrl(this.#activeWebview.getAttribute('src'));
+            let text = button.querySelector('.DomainText');
+            if (!text) {
+                text = document.createElement('div');
+                text.className = 'UrlFragment--Lowlight DomainText';
+                button.appendChild(text);
             }
+            const domain = this.#info.domain.replace(/^www\./, '');
+            if (text.textContent !== domain) text.textContent = domain;
+            button.disabled = !this.#info.target;
+            button.title = this.#info.target || this.#info.domain;
+            button.dataset.tabId = this.#tab?.id ?? '';
+            button.dataset.target = this.#info.target || '';
 
-            return title;
-        }
-
-        async #getDomainInfo() {
-            if (!this.#urlFragmentLink && !this.#urlFragmentHighlight) return {domain: ''};
-            return await this.#parseUrlDomain(this.#urlFragmentLink ? this.#urlFragmentLink.innerText : this.#urlFragmentHighlight.innerText);
-        }
-
-        #calculateDomainPrefix(type) {
-            if (type === 'url') {
-                return 'https://';
-            } else if (type === 'vivaldi') {
-                return 'vivaldi://';
-            } else if (type === 'about') {
-                return '';
-            } else {
-                return null;
+            const wrapper = field.querySelector('.UrlFragment-Wrapper');
+            if (!wrapper) {
+                this.#setTitleTooltip(null, '');
+                return;
             }
+            let title = wrapper.querySelector('.PageTitle');
+            if (!title) {
+                title = document.createElement('div');
+                title.className = 'UrlFragment--Highlight PageTitle';
+                wrapper.appendChild(title);
+            }
+            const pending = this.#tab?.pendingUrl && this.#tab.pendingUrl !== this.#tab.url;
+            const value = !pending && this.#tab?.title && this.#tab.title !== 'Vivaldi' ? this.#tab.title : this.#info.domain || this.#url;
+            if (title.textContent !== value) title.textContent = value;
+            title.title = value;
+            this.#setTitleTooltip(field.querySelector('.UrlBar-UrlFieldWrapper'), value);
         }
 
-        #parseVivaldiDomain(url) {
-            const regexp = /vivaldi:\/\/([^\/]*)/;
-            const match = url.match(regexp);
-            return match ? match[1] : url;
-        }
-
-        async #parseUrlDomain(url) {
-            if (url.startsWith('vivaldi://')) {
-                const domain = this.#parseVivaldiDomain(url);
-                return {type: 'vivaldi', domain: domain, clickable: true};
-            } else if (url.startsWith('file://')) {
-                return {type: 'file', domain: 'file', clickable: false};
-            } else if (url.startsWith('about:')) {
-                return {type: 'about', domain: url, clickable: true};
-            } else if (url.startsWith('chrome-extension://')) {
-                try {
-                    let extension = await chrome.management.get(url.match(/chrome-extension:\/\/([^/]+)/)[1]);
-                    return {type: 'extension', domain: extension.name, clickable: false};
-                } catch (e) {
-                    return {type: 'extension', domain: 'Extension', clickable: false};
+        #setTitleTooltip(area, value) {
+            if (area !== this.#tooltipArea) {
+                this.#tooltipCleanup?.();
+                this.#tooltipArea = area;
+                this.#tooltipCleanup = null;
+                if (area) {
+                    const original = area.getAttribute('title');
+                    const restore = () => original === null ? area.removeAttribute('title') : area.setAttribute('title', original);
+                    const onBlur = () => this.#scheduleRender();
+                    area.addEventListener('focusin', restore);
+                    area.addEventListener('focusout', onBlur);
+                    this.#tooltipCleanup = () => {
+                        area.removeEventListener('focusin', restore);
+                        area.removeEventListener('focusout', onBlur);
+                        restore();
+                    };
                 }
-            } else {
-                return {type: 'url', domain: url, clickable: true};
             }
+            // The transparent native input receives the pointer and inherits this tooltip.
+            if (area && !area.matches(':focus-within')) area.title = value;
         }
 
-        #parseTitleFromUrl(title) {
-            const regexp = /\/([^\/]*)$/;
-            const match = title.match(regexp);
-            return match ? match[1] : title;
-        }
-
-        // getters
-
-        #getElement(key, selector) {
-            if (!this.#elements[key] || !this.#elements[key].isConnected) {
-                this.#elements[key] = document.querySelector(selector);
-            }
-            return this.#elements[key];
-        }
-
-        get #browser() {
-            return this.#getElement('browser', '#browser');
-        }
-
-        get #head() {
-            return this.#getElement('head', 'head');
-        }
-
-        get #title() {
-            return this.#getElement('title', 'title');
-        }
-
-        get #urlFieldInput() {
-            return this.#getElement('urlFieldInput', '#urlFieldInput');
-        }
-
-        get #activeWebview() {
-            return document.querySelector('.webpageview.active.visible webview');
-        }
-
-        get #urlBarAddressField() {
-            return this.#getElement('urlBarAddressField', '.UrlBar-AddressField');
-        }
-
-        get #urlBarUrlFieldWrapper() {
-            return this.#getElement('urlBarUrlFieldWrapper', '.UrlBar-AddressField .UrlBar-UrlFieldWrapper');
-        }
-
-        get #urlFragmentWrapper() {
-            return document.querySelector('.UrlBar-AddressField .UrlFragment-Wrapper');
-        }
-
-        get #urlFragmentLink() {
-            return document.querySelector('.UrlBar-AddressField .UrlFragment-Link');
-        }
-
-        get #urlFragmentHighlight() {
-            return document.querySelector('.UrlBar-AddressField span.UrlFragment--Highlight');
-        }
-
-        get #domainButton() {
-            return document.querySelector('.DomainButton');
-        }
-
-        get #domainText() {
-            return document.querySelector('.UrlFragment--Lowlight.DomainText');
-        }
-
-        get #pageTitle() {
-            return document.querySelector('.PageTitle');
+        destroy() {
+            if (this.#disposed) return;
+            this.#disposed = true;
+            this.#version++;
+            this.#controller.abort();
+            this.#observer.disconnect();
+            this.#tooltipCleanup?.();
+            cancelAnimationFrame(this.#frame);
+            for (const [event, handler] of this.#listeners) event.removeListener(handler);
+            this.#listeners.length = 0;
+            this.#extensions.clear();
+            document.querySelectorAll('#browser .DomainButton, #browser .PageTitle').forEach(element => element.remove());
+            this.#style.remove();
         }
     }
 
     function initMod() {
-        if (document.querySelector('#urlFieldInput')) {
+        const ready = () => document.head && document.getElementById('browser');
+        const start = () => {
+            window.domainTitleBar?.destroy?.();
             window.domainTitleBar = new DomainTitleBar();
-        } else {
-            const observer = new MutationObserver((mutations, obs) => {
-                if (document.querySelector('#urlFieldInput')) {
-                    obs.disconnect();
-                    window.domainTitleBar = new DomainTitleBar();
+        };
+        if (ready()) start();
+        else {
+            const observer = new MutationObserver(() => {
+                if (ready()) {
+                    observer.disconnect();
+                    start();
                 }
             });
-            observer.observe(document.documentElement, { childList: true, subtree: true });
+            observer.observe(document.documentElement, {childList: true, subtree: true});
+            addEventListener('unload', () => observer.disconnect(), {once: true});
         }
     }
 
