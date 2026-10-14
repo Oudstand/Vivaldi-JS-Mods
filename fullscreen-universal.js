@@ -12,22 +12,21 @@
         updateHoverDivSize = false, // decreases the size for the hover divs in fullscreen mode - set ti false to disable the feature
         hidePanels = true, // set to false to not hide the panels
         hideTabs = true, // set to false to not hide the tabs - currently only works with vertical tabs
-        useTwoLevelTabStack = false; // set to true if you use two level tab stack to recalculate height
+        useTwoLevelTabStack = false; // additionally observe the second tab-stack level directly
 
     function initFullscreen() {
-        const browser = document.getElementById('browser');
-        if (browser) {
-            console.log('Browser');
+        const isReady = () => document.head && document.getElementById('app') && document.getElementById('browser') && document.getElementById('webview-container');
+        if (isReady()) {
             new FullscreenMod();
         } else {
             const observer = new MutationObserver((mutations, obs) => {
-                if (document.getElementById('browser')) {
+                if (isReady()) {
                     obs.disconnect();
-                    console.log('Browser');
                     new FullscreenMod();
                 }
             });
             observer.observe(document.documentElement, { childList: true, subtree: true });
+            addEventListener('unload', () => observer.disconnect(), {once: true});
         }
     }
 
@@ -39,7 +38,13 @@
 
         positions = ['top', 'bottom', 'left', 'right'];
 
-        fullscreenEnabled;
+        fullscreenEnabled = true;
+        settingsReady = false;
+        stateChanged = false;
+        disposed = false;
+        listenerController = null;
+        webviewController = null;
+        boundWebview = null;
 
         hoverDivTop;
         hoverDivLeft;
@@ -52,14 +57,16 @@
         showBottomTimeout;
         hideTimeout;
 
-        subcontainerObserver;
+        layoutObserver = null;
+        editObserver = null;
+        resizeObserver = null;
+        observedElements = new Set();
         heightsRAF = null;
 
         styleEl = null;
         handlers = null;
 
         constructor() {
-            this.createStyle();
             this.handlers = {
                 hide: this.hide.bind(this),
                 clearHideTimeout: this.clearHideTimeout.bind(this),
@@ -68,17 +75,29 @@
                 showRight: this.showRight.bind(this),
                 showBottom: this.showBottom.bind(this),
                 clearTimeouts: this.clearTimeouts.bind(this),
-                updateHoverDivs: this.updateHoverDivs.bind(this)
+                scheduleHeights: this.scheduleHeights.bind(this),
+                shortcut: (id, combination) => {
+                    if (combination === 'F11' && id === vivaldiWindowId) this.toggleFullScreen();
+                },
+                destroy: this.destroy.bind(this)
             };
 
             chrome.storage.local.get('fullScreenModEnabled').then(value => {
-                this.fullscreenEnabled = value.fullScreenModEnabled || value.fullScreenModEnabled == undefined;
-
-                if (this.fullscreenEnabled) {
-                    this.addFullScreenListener();
+                if (this.disposed || this.stateChanged) return;
+                this.settingsReady = true;
+                this.fullscreenEnabled = value.fullScreenModEnabled !== false;
+                this.syncEnabledState();
+            }).catch(error => {
+                console.debug('Fullscreen mod: Failed to read settings:', error);
+                if (!this.disposed && !this.stateChanged) {
+                    this.settingsReady = true;
+                    this.syncEnabledState();
                 }
             });
-            vivaldi.tabsPrivate.onKeyboardShortcut.addListener((id, combination) => combination === 'F11' && id === vivaldiWindowId && this.toggleFullScreen());
+            this.editObserver = new MutationObserver(() => this.syncEnabledState());
+            this.editObserver.observe(this.browser, {attributes: true, attributeFilter: ['class']});
+            vivaldi.tabsPrivate.onKeyboardShortcut.addListener(this.handlers.shortcut);
+            addEventListener('unload', this.handlers.destroy, {once: true});
         }
 
         createStyle() {
@@ -106,20 +125,36 @@
                 `;
             }
 
-            if (this.styleEl?.parentNode) this.styleEl.parentNode.removeChild(this.styleEl);
-            this.styleEl = document.createElement('style');
-            this.styleEl.textContent = style;
-            document.head.appendChild(this.styleEl);
+            if (!this.styleEl) {
+                this.styleEl = document.createElement('style');
+                document.head.appendChild(this.styleEl);
+            }
+            if (this.styleEl.textContent !== style) this.styleEl.textContent = style;
+        }
 
-            // this.styleEl.appendChild(document.createTextNode(style));
-            this.destroyHoverDivs();
-            this.hoverDivTop = this.createHorizontalHoverDiv('top');
-            this.hoverDivLeft = (hidePanels && this.panelsLeft) || this.tabBarPosition === 'left' ? this.createVerticalHoverDiv('left') : undefined;
-            this.hoverDivRight = (hidePanels && this.panelsRight) || this.tabBarPosition === 'right' ? this.createVerticalHoverDiv('right') : undefined;
-            this.hoverDivBottom =
-                !this.addressBarTop || this.tabBarPosition === 'bottom' || !this.bookmarksTop || document.querySelector('#footer').childNodes.length
-                    ? this.createHorizontalHoverDiv('bottom')
-                    : undefined;
+        syncHoverDivs() {
+            const needed = {
+                top: Boolean(this.topCSS()),
+                left: Boolean(this.leftCSS()),
+                right: Boolean(this.rightCSS()),
+                bottom: Boolean(this.bottomCSS())
+            };
+            for (const position of this.positions) {
+                const suffix = position[0].toUpperCase() + position.slice(1);
+                const key = 'hoverDiv' + suffix;
+                if (needed[position] && !this[key]) {
+                    this[key] = ['top', 'bottom'].includes(position) ? this.createHorizontalHoverDiv(position) : this.createVerticalHoverDiv(position);
+                    const options = {signal: this.listenerController.signal};
+                    this[key].addEventListener('pointerenter', this.handlers['show' + suffix], options);
+                    this[key].addEventListener('pointerleave', this.handlers.clearTimeouts, options);
+                    if (this.webView?.matches(':hover')) this.app.classList.add('hidden-' + position);
+                } else if (!needed[position]) {
+                    clearTimeout(this['show' + suffix + 'Timeout']);
+                    this[key]?.remove();
+                    this[key] = undefined;
+                    this.app.classList.remove('hidden-' + position);
+                }
+            }
         }
 
         destroyHoverDivs() {
@@ -130,125 +165,150 @@
         }
 
         rebuildStyle() {
-            this.createStyle(); // CSS + Hover-Divs aus aktueller DOM-Lage
+            if (!this.listenerController || this.disposed) return;
+            this.createStyle();
+            this.syncHoverDivs();
+            this.bindWebview();
+            this.observeLayoutElements();
+            this.calculateHeights();
             if (updateHoverDivSize) this.updateHoverDivs();
-            this.scheduleHeights(); // CSS-Variablen (--fs-*) frisch berechnen
         }
 
         toggleFullScreen() {
+            if (this.disposed) return;
+            this.settingsReady = true;
+            this.stateChanged = true;
             this.fullscreenEnabled = !this.fullscreenEnabled;
-            if (this.fullscreenEnabled) this.rebuildStyle();
-            this.fullscreenEnabled ? this.addFullScreenListener() : this.removeFullScreenListener();
-            chrome.storage.local.set({fullScreenModEnabled: this.fullscreenEnabled});
+            this.syncEnabledState();
+            chrome.storage.local.set({fullScreenModEnabled: this.fullscreenEnabled})
+                .catch(error => console.debug('Fullscreen mod: Failed to save settings:', error));
+        }
+
+        syncEnabledState() {
+            if (!this.settingsReady || this.disposed) return;
+            if (this.fullscreenEnabled && !this.browser?.classList.contains('toolbar-edit-mode')) this.addFullScreenListener();
+            else this.removeFullScreenListener();
         }
 
         addFullScreenListener() {
+            if (this.listenerController || this.disposed) return;
+            this.listenerController = new AbortController();
             this.app.classList.add('fullscreen-listener-enabled');
-            this.webView.addEventListener('pointerenter', this.hide.bind(this));
-
-            if (hideDelay) this.webView.addEventListener('pointerleave', this.handlers.clearHideTimeout);
-
-            this.hoverDivTop?.addEventListener('pointerenter', this.handlers.showTop);
-            this.hoverDivTop?.addEventListener('pointerleave', this.handlers.clearTimeouts);
-            this.hoverDivLeft?.addEventListener('pointerenter', this.handlers.showLeft);
-            this.hoverDivLeft?.addEventListener('pointerleave', this.handlers.clearTimeouts);
-            this.hoverDivRight?.addEventListener('pointerenter', this.handlers.showRight);
-            this.hoverDivRight?.addEventListener('pointerleave', this.handlers.clearTimeouts);
-            this.hoverDivBottom?.addEventListener('pointerenter', this.handlers.showBottom);
-            this.hoverDivBottom?.addEventListener('pointerleave', this.handlers.clearTimeouts);
-
-            if (updateHoverDivSize) addEventListener('resize', this.handlers.updateHoverDivs);
-
-            this.startSubcontainerObserver();
-            this.scheduleHeights();
+            addEventListener('resize', this.handlers.scheduleHeights, {passive: true, signal: this.listenerController.signal});
+            this.startLayoutObservers();
+            this.rebuildStyle();
             this.hide();
         }
 
+        bindWebview() {
+            const webview = this.webView;
+            if (webview === this.boundWebview) return;
+            this.webviewController?.abort();
+            this.boundWebview = webview;
+            this.webviewController = new AbortController();
+            const options = {signal: this.webviewController.signal};
+            webview?.addEventListener('pointerenter', this.handlers.hide, options);
+            webview?.addEventListener('pointerleave', this.handlers.clearHideTimeout, options);
+        }
+
         removeFullScreenListener() {
-            this.app.classList.remove('fullscreen-listener-enabled');
-            this.webView.removeEventListener('pointerenter', this.hide);
+            this.listenerController?.abort();
+            this.listenerController = null;
+            this.webviewController?.abort();
+            this.webviewController = null;
+            this.boundWebview = null;
+            this.clearTimeouts();
+            this.clearHideTimeout();
+            clearTimeout(this.#updateHoverDivsTimeout);
+            this.#updateHoverDivsTimeout = null;
+            this.stopLayoutObservers();
+            this.destroyHoverDivs();
+            this.app?.classList.remove('fullscreen-listener-enabled', ...this.positions.map(position => 'hidden-' + position));
+        }
 
-            if (hideDelay) this.webView.removeEventListener('pointerleave', this.handlers.clearHideTimeout);
-
-            this.hoverDivTop?.removeEventListener('pointerenter', this.handlers.showTop);
-            this.hoverDivTop?.removeEventListener('pointerleave', this.handlers.clearTimeouts);
-            this.hoverDivLeft?.removeEventListener('pointerenter', this.handlers.showLeft);
-            this.hoverDivLeft?.removeEventListener('pointerleave', this.handlers.clearTimeouts);
-            this.hoverDivRight?.removeEventListener('pointerenter', this.handlers.showRight);
-            this.hoverDivRight?.removeEventListener('pointerleave', this.handlers.clearTimeouts);
-            this.hoverDivBottom?.removeEventListener('pointerenter', this.handlers.showBottom);
-            this.hoverDivBottom?.removeEventListener('pointerleave', this.handlers.clearTimeouts);
-
-            if (updateHoverDivSize) removeEventListener('resize', this.handlers.updateHoverDivs);
-
-            this.stopSubcontainerObserver();
-            this.show();
+        destroy() {
+            if (this.disposed) return;
+            this.disposed = true;
+            this.editObserver?.disconnect();
+            this.removeFullScreenListener();
+            this.styleEl?.remove();
+            vivaldi.tabsPrivate.onKeyboardShortcut.removeListener(this.handlers.shortcut);
+            removeEventListener('unload', this.handlers.destroy);
         }
 
         clearTimeouts() {
-            if (this.showTopTimeout) clearTimeout(this.showTopTimeout);
-            if (this.showLeftTimeout) clearTimeout(this.showLeftTimeout);
-            if (this.showRightTimeout) clearTimeout(this.showRightTimeout);
-            if (this.showBottomTimeout) clearTimeout(this.showBottomTimeout);
+            for (const position of this.positions) {
+                const key = 'show' + position[0].toUpperCase() + position.slice(1) + 'Timeout';
+                clearTimeout(this[key]);
+                this[key] = null;
+            }
         }
 
         clearHideTimeout() {
-            if (this.hideTimeout) clearTimeout(this.hideTimeout);
+            clearTimeout(this.hideTimeout);
+            this.hideTimeout = null;
         }
 
         hide() {
+            if (!this.listenerController) return;
+            this.clearHideTimeout();
+            this.clearTimeouts();
             this.hideTimeout = setTimeout(() => {
-                this.app.classList.add('hidden-top');
+                this.hideTimeout = null;
+                if (!this.listenerController) return;
+                if (this.hoverDivTop) this.app.classList.add('hidden-top');
                 if (this.hoverDivLeft) this.app.classList.add('hidden-left');
                 if (this.hoverDivRight) this.app.classList.add('hidden-right');
                 if (this.hoverDivBottom) this.app.classList.add('hidden-bottom');
             }, hideDelay);
         }
 
-        show() {
-            this.showTop();
-            this.showLeft();
-            this.showRight();
-            this.showBottom();
+        showSide(position) {
+            if (!this.listenerController) return;
+            const suffix = position[0].toUpperCase() + position.slice(1);
+            if (!this['hoverDiv' + suffix]) return;
+            this.clearHideTimeout();
+            const key = 'show' + suffix + 'Timeout';
+            clearTimeout(this[key]);
+            this[key] = setTimeout(() => {
+                this[key] = null;
+                if (this.listenerController) this.app.classList.remove('hidden-' + position);
+            }, showDelay);
         }
 
         showTop() {
-            this.showTopTimeout = setTimeout(() => this.app.classList.remove('hidden-top'), showDelay);
+            this.showSide('top');
         }
 
         showLeft() {
-            if (this.hoverDivLeft) {
-                this.showLeftTimeout = setTimeout(() => this.app.classList.remove('hidden-left'), showDelay);
-            }
+            this.showSide('left');
         }
 
         showRight() {
-            if (this.hoverDivRight) {
-                this.showRightTimeout = setTimeout(() => this.app.classList.remove('hidden-right'), showDelay);
-            }
+            this.showSide('right');
         }
 
         showBottom() {
-            if (this.hoverDivBottom) {
-                this.showBottomTimeout = setTimeout(() => this.app.classList.remove('hidden-bottom'), showDelay);
-            }
+            this.showSide('bottom');
         }
 
         isWindowMaximized() {
-            return this.browser.classList.contains('maximized');
+            return this.browser?.classList.contains('maximized');
         }
 
         setHorizontalHoverDivHeight(hoverDiv) {
-            hoverDiv.style.height = updateHoverDivSize && this.isWindowMaximized() ? '1px' : '1.5rem';
+            if (hoverDiv) hoverDiv.style.height = updateHoverDivSize && this.isWindowMaximized() ? '1px' : '1.5rem';
         }
 
         setVerticalHoverDivWidth(hoverDiv) {
-            hoverDiv.style.width = updateHoverDivSize && this.isWindowMaximized() ? '1px' : '1.5rem';
+            if (hoverDiv) hoverDiv.style.width = updateHoverDivSize && this.isWindowMaximized() ? '1px' : '1.5rem';
         }
 
         updateHoverDivs() {
             if (this.#updateHoverDivsTimeout) clearTimeout(this.#updateHoverDivsTimeout);
             this.#updateHoverDivsTimeout = setTimeout(() => {
+                this.#updateHoverDivsTimeout = null;
+                if (!this.listenerController) return;
                 this.setHorizontalHoverDivHeight(this.hoverDivTop);
                 if (this.hoverDivLeft) this.setVerticalHoverDivWidth(this.hoverDivLeft);
                 if (this.hoverDivRight) this.setVerticalHoverDivWidth(this.hoverDivRight);
@@ -284,45 +344,44 @@
             return hoverDiv;
         }
 
-        startSubcontainerObserver() {
-            if (!useTwoLevelTabStack || !this.tabBarContainer) return;
-
-            this.subcontainerObserver = new MutationObserver(mutations => {
-                for (const mutation of mutations) {
-                    let hit = false;
-                    for (let i = 0; i < mutation.addedNodes.length; i++) {
-                        const node = mutation.addedNodes[i];
-                        if (node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer') {
-                            hit = true;
-                            break;
-                        }
+        startLayoutObservers() {
+            this.resizeObserver = new ResizeObserver(this.handlers.scheduleHeights);
+            const selector = '#header, .mainbar, .bookmark-bar, #footer, #tabs-tabbar-container, .tabbar-wrapper, #panels-container, #webview-container' +
+                (useTwoLevelTabStack ? ', #tabs-subcontainer' : '');
+            this.layoutObserver = new MutationObserver(mutations => {
+                const relevant = mutations.some(mutation => {
+                    if (mutation.type === 'attributes') {
+                        return [this.browser, this.tabBarContainer, this.panelsContainer].includes(mutation.target);
                     }
-                    if (!hit) {
-                        for (let i = 0; i < mutation.removedNodes.length; i++) {
-                            const node = mutation.removedNodes[i];
-                            if (node.nodeType === Node.ELEMENT_NODE && node.id === 'tabs-subcontainer') {
-                                hit = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (hit) {
-                        this.scheduleHeights();
-                        break;
-                    }
-                }
+                    if (mutation.target === this.footer) return true;
+                    return [...mutation.addedNodes, ...mutation.removedNodes].some(node =>
+                        node.nodeType === Node.ELEMENT_NODE && (node.matches(selector) || node.querySelector(selector)));
+                });
+                if (relevant) this.scheduleHeights();
             });
-
-            this.subcontainerObserver.observe(this.tabBarContainer, {childList: true});
-            addEventListener('resize', this.scheduleHeights.bind(this), {passive: true});
+            this.layoutObserver.observe(this.browser, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']});
         }
 
-        stopSubcontainerObserver() {
-            if (this.subcontainerObserver) {
-                this.subcontainerObserver.disconnect();
-                this.subcontainerObserver = null;
+        observeLayoutElements() {
+            const elements = new Set([
+                this.header, this.mainBar, this.bookmarkBar, this.footer,
+                this.tabBarContainer, this.tabBarWrapper, this.panelsContainer,
+                useTwoLevelTabStack && this.tabBarContainer?.querySelector('#tabs-subcontainer')
+            ].filter(Boolean));
+            for (const element of this.observedElements) {
+                if (!elements.has(element)) this.resizeObserver.unobserve(element);
             }
+            for (const element of elements) {
+                if (!this.observedElements.has(element)) this.resizeObserver.observe(element);
+            }
+            this.observedElements = elements;
+        }
+
+        stopLayoutObservers() {
+            this.layoutObserver?.disconnect();
+            this.resizeObserver?.disconnect();
+            this.layoutObserver = this.resizeObserver = null;
+            this.observedElements.clear();
             if (this.heightsRAF) {
                 cancelAnimationFrame(this.heightsRAF);
                 this.heightsRAF = null;
@@ -330,10 +389,10 @@
         }
 
         scheduleHeights() {
-            if (this.heightsRAF) return;
+            if (!this.listenerController || this.heightsRAF) return;
             this.heightsRAF = requestAnimationFrame(() => {
                 this.heightsRAF = null;
-                this.calculateHeights();
+                this.rebuildStyle();
             });
         }
 
@@ -352,7 +411,7 @@
             if (this.bookmarksTop && this.bookmarkBar) topOffset += bookmarkBarHeight;
 
             // Bottom
-            if (this.footer.childNodes.length) bottomOffset += footerHeight;
+            if (this.footer?.childNodes.length) bottomOffset += footerHeight;
             if (!this.addressBarTop) bottomOffset += mainBarHeight;
             if (!this.bookmarksTop && this.bookmarkBar) bottomOffset += bookmarkBarHeight;
 
@@ -362,6 +421,14 @@
             this.app.style.setProperty('--fs-main-bar-height', mainBarHeight + 'px');
             this.app.style.setProperty('--fs-bookmark-bar-height', bookmarkBarHeight + 'px');
             this.app.style.setProperty('--fs-footer-height', footerHeight + 'px');
+            const tabWidth = this.tabBarWrapper?.offsetWidth || 0;
+            const panelWidth = this.panelsContainer?.offsetWidth || 0;
+            this.app.style.setProperty('--fs-panel-width', panelWidth + 'px');
+            for (const side of ['left', 'right']) {
+                const width = (hideTabs && this.tabBarPosition === side ? tabWidth : 0) +
+                    (hidePanels && this['panels' + side[0].toUpperCase() + side.slice(1)] ? panelWidth : 0);
+                this.app.style.setProperty('--fs-' + side + '-offset', width + 'px');
+            }
         }
 
         generalCSS() {
@@ -426,8 +493,8 @@
         topCSS() {
             const topElements = [];
 
-            if (this.tabBarPosition === 'top' || !this.addressBarTop) topElements.push('#header');
-            if (this.addressBarTop) topElements.push('.mainbar');
+            if (this.header && (this.tabBarPosition === 'top' || !this.addressBarTop)) topElements.push('#header');
+            if (this.addressBarTop && this.mainBar) topElements.push('.mainbar');
             if (this.bookmarksTop && this.bookmarkBar) topElements.push('.bookmark-bar');
 
             if (topElements.length === 0) return '';
@@ -500,19 +567,14 @@
 
         leftCSS() {
             const leftElements = [];
-            let css = '',
-                width = 0,
-                tabBarWrapper;
+            let css = '';
 
-            if (hideTabs && this.tabBarPosition === 'left') {
+            if (hideTabs && this.tabBarPosition === 'left' && this.tabBarWrapper) {
                 leftElements.push('.tabbar-wrapper');
-                tabBarWrapper = document.querySelector('.tabbar-wrapper');
-                width += tabBarWrapper.offsetWidth;
             }
 
             if (hidePanels && this.panelsLeft) {
                 leftElements.push('#panels-container');
-                width += this.panelsContainer.offsetWidth;
             }
 
             if (leftElements.length === 0) {
@@ -522,7 +584,7 @@
             css += `
                 &.hidden-left {
                     ${leftElements.join(', ')} {
-                        transform: translateX(-${width}px);
+                        transform: translateX(calc(var(--fs-left-offset, 0px) * -1));
                         opacity: 0;
                         visibility: hidden;
                     }
@@ -533,12 +595,12 @@
                 }
             `;
 
-            if (this.tabBarPosition === 'left') {
+            if (hideTabs && this.tabBarPosition === 'left') {
                 css += `
                     .tabbar-wrapper {
                         position: absolute;
                         top: 0;
-                        left: ${this.panelsLeft ? this.panelsContainer.offsetWidth : 0}px;
+                        left: ${this.panelsLeft ? 'var(--fs-panel-width, 0px)' : '0px'};
                         z-index: 1;
                         transition: transform .5s, opacity .5s ease-in-out !important;
 
@@ -562,18 +624,12 @@
 
         rightCSS() {
             const rightElements = [];
-            let width = 0,
-                tabBarWrapper;
-
-            if (hideTabs && this.tabBarPosition === 'right') {
+            if (hideTabs && this.tabBarPosition === 'right' && this.tabBarWrapper) {
                 rightElements.push('.tabbar-wrapper');
-                tabBarWrapper = document.querySelector('.tabbar-wrapper');
-                width += tabBarWrapper.offsetWidth;
             }
 
             if (hidePanels && this.panelsRight) {
                 rightElements.push('#panels-container');
-                width += this.panelsContainer.offsetWidth;
             }
 
             if (rightElements.length === 0) {
@@ -583,7 +639,7 @@
             let css = `
                 &.hidden-right {
                     ${rightElements.join(', ')} {
-                        transform: translateX(${width}px);
+                        transform: translateX(var(--fs-right-offset, 0px));
                         opacity: 0;
                         visibility: hidden;
                     }
@@ -594,12 +650,12 @@
                 }
             `;
 
-            if (this.tabBarPosition === 'right') {
+            if (hideTabs && this.tabBarPosition === 'right') {
                 css += `
                     .tabbar-wrapper {
                         position: absolute;
                         top: 0;
-                        right: ${this.panelsRight ? this.panelsContainer.offsetWidth : 0}px;
+                        right: ${this.panelsRight ? 'var(--fs-panel-width, 0px)' : '0px'};
                         z-index: 1;
                         transition: transform .5s, opacity .5s ease-in-out !important;
 
@@ -624,8 +680,8 @@
         bottomCSS() {
             const bottomElements = [];
 
-            if (this.footer.childNodes.length) bottomElements.push('#footer');
-            if (!this.addressBarTop) bottomElements.push('.mainbar');
+            if (this.footer?.childNodes.length) bottomElements.push('#footer');
+            if (!this.addressBarTop && this.mainBar) bottomElements.push('.mainbar');
             if (!this.bookmarksTop && this.bookmarkBar) bottomElements.push('.bookmark-bar');
 
             if (bottomElements.length === 0) return '';
@@ -681,7 +737,6 @@
                 if (!this.bookmarksTop) {
                     css += `
                         .bookmark-bar-bottom-off .mainbar {
-                            padding-bottom: -5px;
                             background: var(--colorAccentBg);
                         }
                     `;
@@ -739,6 +794,10 @@
             return this.#getElement('tabBarContainer', '#tabs-tabbar-container');
         }
 
+        get tabBarWrapper() {
+            return this.#getElement('tabBarWrapper', '.tabbar-wrapper');
+        }
+
         get panelsLeft() {
             return this.panelsContainer?.classList.contains('left');
         }
@@ -752,15 +811,15 @@
         }
 
         get tabBarPosition() {
-            return this.positions.find(cls => this.tabBarContainer.classList.contains(cls));
+            return this.positions.find(cls => this.tabBarContainer?.classList.contains(cls));
         }
 
         get addressBarTop() {
-            return this.browser.classList.contains('address-top');
+            return this.browser?.classList.contains('address-top');
         }
 
         get bookmarksTop() {
-            return this.browser.classList.contains('bookmark-bar-top');
+            return this.browser?.classList.contains('bookmark-bar-top');
         }
 
         getHeight(el) {
