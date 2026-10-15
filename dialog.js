@@ -151,7 +151,7 @@
         }
 
         /**
-         * Open Default Search Engine in Dialog and search for the selected text
+         * Open Default Search Engine in Dialog, optionally searching for selected text
          * @returns {Promise<void>}
          */
         async searchForSelectedText() {
@@ -175,9 +175,8 @@
                     } catch { resolve(''); }
                 });
             }
-            if (!text?.trim()) return;
             const engineId = this.searchEngineUtils.incognito ? this.searchEngineUtils.privateSearchId : this.searchEngineUtils.defaultSearchId;
-            await this.dialogTabSearch(engineId, text);
+            await this.dialogTabSearch(engineId, text?.trim() ? text : '');
         }
 
         /**

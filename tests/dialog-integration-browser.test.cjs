@@ -61,6 +61,22 @@ const http = require('node:http');
   await evaluate(`(async()=>{const a=await chrome.tabs.create({url:${JSON.stringify(articleURL)},active:true,windowId:vivaldiWindowId});const b=await chrome.tabs.create({url:${JSON.stringify(articleURL)}+'?second',active:false,windowId:vivaldiWindowId});window.__tabs={a:a.id,b:b.id};})()`);
   await until('Number(__mod.getActiveWebview()?.tab_id)===__tabs.a');
 
+  // Use the real native search request, redirecting only its URL to the local fixture.
+  await evaluate(`(()=>{window.__nativeSearchRequest=vivaldi.searchEngines.getSearchRequest;window.__shortcutSearches=[];vivaldi.searchEngines.getSearchRequest=async(engine,text)=>{const request=await __nativeSearchRequest(engine,text);__shortcutSearches.push({engine,text,url:request.url});return {...request,url:${JSON.stringify(articleURL)}};};})()`);
+  try {
+   for(const combination of ['Ctrl+Alt+Period','Ctrl+Shift+F']){
+    await evaluate(`(async()=>{const webview=__mod.getActiveWebview();webview.focus();await new Promise(resolve=>webview.executeScript({code:'window.getSelection().removeAllRanges()'},resolve));__mod.keyCombo(vivaldiWindowId,${JSON.stringify(combination)});})()`);
+    await until('__mod.webviews.size===1&&[...__mod.webviews.values()][0].divContainer.isConnected');
+    const request=await evaluate('__shortcutSearches.at(-1)');
+    assert.equal(request.text,'');
+    assert.equal(request.engine,await evaluate('__mod.searchEngineUtils.defaultSearchId'));
+    assert.ok(new URL(request.url).hostname,'The native engine must accept an empty search');
+    await evaluate('__mod.removeDialog([...__mod.webviews.keys()][0])');
+    await until('__mod.webviews.size===0');
+   }
+  } finally {await evaluate('vivaldi.searchEngines.getSearchRequest=__nativeSearchRequest');}
+  console.log('PASS both search shortcuts open a dialog without selected text');
+
   const openSizedDialog=async()=>{
    const id=await evaluate(`(()=>{__mod.showDialog(${JSON.stringify(articleURL)},false);return [...__mod.webviews.keys()].at(-1);})()`);
    await until(`__mod.webviews.get(${JSON.stringify(id)})?.divContainer.isConnected`);

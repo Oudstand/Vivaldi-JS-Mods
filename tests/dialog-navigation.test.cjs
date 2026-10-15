@@ -90,12 +90,26 @@ test('an empty native selection falls back to the focused webview frame, includi
     assert.deepEqual(fixture.searches, [['default', 'iframe selection']]);
 });
 
-test('selection search tolerates an empty window and ignores empty selection', async () => {
-    for (const options of [{tabs: []}, {text: ''}, {text: '  '}]) {
-        const fixture = selectionFixture(options);
-        await fixture.search.searchForSelectedText();
-        assert.deepEqual(fixture.searches, []);
+test('selection shortcut opens the default engine without selected text, also in private windows', async () => {
+    for (const incognito of [false, true]) {
+        for (const text of ['', '  ', null]) {
+            const fixture = selectionFixture({incognito, text});
+            await fixture.search.searchForSelectedText();
+            assert.deepEqual(fixture.searches, [[incognito ? 'private' : 'default', '']]);
+        }
     }
+});
+
+test('selection shortcut opens the default engine when the focused webview has no selection', async () => {
+    const fixture = selectionFixture({focusedTab: '303', nativeText: '', frameTexts: ['', '']});
+    await fixture.search.searchForSelectedText();
+    assert.deepEqual(fixture.searches, [['default', '']]);
+});
+
+test('selection search tolerates an empty window', async () => {
+    const fixture = selectionFixture({tabs: []});
+    await fixture.search.searchForSelectedText();
+    assert.deepEqual(fixture.searches, []);
 });
 
 test('shortcuts from other windows do not close dialogs or start searches', () => {
