@@ -575,6 +575,8 @@
                 webview.setAttribute('tab_id', tabId);
                 webview.setAttribute('parent_tab_id', '0');
                 webview.setAttribute('name', 'vivaldi-dialog');
+                DialogGestures.attach(this.webviews.get(webviewId));
+                new DialogMouseButtons(this.webviews.get(webviewId));
                 return true;
             });
         }
@@ -797,6 +799,141 @@
         openNewTabFromWebview(webview, active) {
             chrome.tabs.create({url: webview.src, active: active});
         }
+    }
+
+    class DialogGestures {
+        static #key = Symbol.for('dialog.mod.gestures');
+
+        static attach(data) {
+            try {
+                const core = chrome.extension.getViews().find(view => view.location.href === chrome.runtime.getURL('main.html'));
+                if (!core) throw new Error('Vivaldi main window unavailable');
+                const bridge = core[this.#key] || this.createBridge(core);
+                const entry = {...data, windowId: vivaldiWindowId};
+                bridge.views.set(data.webview, entry);
+                const dispose = () => {
+                    bridge.views.delete(data.webview);
+                    if (bridge.targets.get(entry.windowId) === entry) bridge.targets.delete(entry.windowId);
+                    if (!bridge.views.size) bridge.restore();
+                };
+                window.addEventListener('unload', dispose, {once: true});
+                data.lifetime.add(() => {
+                    window.removeEventListener('unload', dispose);
+                    dispose();
+                });
+            } catch (error) {
+                console.warn('Dialog mouse gestures unavailable:', error);
+            }
+        }
+
+        static createBridge(core) {
+            let require;
+            core.webpackChunkgapp_browser_react.push([[`dialog-gestures-${crypto.randomUUID()}`], {}, runtime => { require = runtime; }]);
+            const id = Object.keys(require.m).find(id => require.m[id].toString().includes('getCommandsForGestures(){'));
+            const commands = id && Object.values(require(id)).find(value => typeof value?.getCommandsForGestures === 'function');
+            const clicks = core.vivaldi.tabsPrivate.onWebviewClickCheck;
+            if (!commands || !clicks) throw new Error('Vivaldi gesture commands unavailable');
+
+            const views = new Map(), targets = new Map();
+            const usable = entry => !entry.lifetime.signal.aborted && entry.divContainer.dataset.closing !== '1'
+                && entry.webview.checkVisibility({visibilityProperty: true});
+            // Vivaldi reports the original press even when the pointer later leaves the dialog.
+            const onClick = (windowId, down, button, x, y) => {
+                if (!down) return;
+                const entry = [...views.values()].find(view => view.windowId === windowId);
+                const element = entry?.webview.ownerDocument.elementFromPoint(Math.round(x), Math.round(y));
+                targets.set(windowId, views.get(element));
+            };
+            // Adapt only direct history/reload gestures. Native actions and chains remain untouched.
+            const handlers = {
+                COMMAND_PAGE_BACK: entry => entry.webview.back(),
+                COMMAND_PAGE_FORWARD: entry => entry.webview.forward(),
+                COMMAND_PAGE_REFRESH: entry => core.chrome.tabs.reload(Number(entry.webview.tab_id)),
+                COMMAND_PAGE_RELOAD_NOCACHE: entry => core.chrome.tabs.reload(Number(entry.webview.tab_id), {bypassCache: true})
+            };
+            const original = commands.getCommandsForGestures;
+            const own = Object.hasOwn(commands, 'getCommandsForGestures');
+            const getCommands = function (...args) {
+                const gestures = original.apply(this, args);
+                for (const entries of Object.values(gestures)) {
+                    for (const command of entries) {
+                        const handler = handlers[command.name];
+                        if (!handler) continue;
+                        const action = command.function;
+                        command.function = function (context) {
+                            const entry = targets.get(context.windowId);
+                            targets.delete(context.windowId);
+                            if (!entry) return action.call(this, context);
+                            if (usable(entry)) return handler(entry);
+                        };
+                    }
+                }
+                return gestures;
+            };
+            const restore = () => {
+                clicks.removeListener(onClick);
+                if (commands.getCommandsForGestures === getCommands) {
+                    if (own) commands.getCommandsForGestures = original;
+                    else delete commands.getCommandsForGestures;
+                }
+                targets.clear();
+                if (core[this.#key]?.restore === restore) delete core[this.#key];
+            };
+            try {
+                commands.getCommandsForGestures = getCommands;
+                clicks.addListener(onClick);
+                return core[this.#key] = {views, targets, restore};
+            } catch (error) {
+                restore();
+                throw error;
+            }
+        }
+    }
+
+    class DialogMouseButtons {
+        constructor({webview, divContainer, lifetime}) {
+            const onMessage = (message, sender) => {
+                if (message?.type !== 'dialog-mouse-navigation' || sender.tab?.id !== Number(webview.tab_id)) return;
+                if (lifetime.signal.aborted || divContainer.dataset.closing === '1'
+                    || !webview.checkVisibility({visibilityProperty: true})) return;
+                if (message.button === 3) webview.back();
+                else if (message.button === 4) webview.forward();
+            };
+            chrome.runtime.onMessage.addListener(onMessage);
+            lifetime.add(() => chrome.runtime.onMessage.removeListener(onMessage));
+
+            const code = `(${DialogMouseButtons.installInPage.toString()})();`;
+            // Register future documents and frames; also cover the already-created related tab.
+            webview.addContentScripts([{name: 'dialog-mouse-navigation', matches: ['<all_urls>'],
+                js: {code}, run_at: 'document_start', all_frames: true, match_about_blank: true}]);
+            const inject = () => {
+                if (lifetime.signal.aborted) return;
+                webview.executeScript({code, allFrames: true}, () => {
+                    if (chrome.runtime.lastError) console.debug('Dialog mod: Mouse button injection failed:', chrome.runtime.lastError.message);
+                });
+            };
+            for (const event of ['webcontentscreated', 'contentload', 'loadstop']) {
+                webview.addEventListener(event, inject, {signal: lifetime.signal});
+            }
+        }
+
+        static installInPage = function () {
+            const key = Symbol.for('dialog.mod.mouseButtons');
+            if (window[key]) return;
+            window[key] = true;
+            const onMouse = event => {
+                if (!event.isTrusted || (event.button !== 3 && event.button !== 4)) return;
+                // Cancel the browser's fallback navigation before forwarding exactly one action.
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                if (event.type === 'mouseup') {
+                    chrome.runtime.sendMessage({type: 'dialog-mouse-navigation', button: event.button}, () => {
+                        void chrome.runtime.lastError;
+                    });
+                }
+            };
+            for (const type of ['mousedown', 'mouseup', 'auxclick']) window.addEventListener(type, onMouse, true);
+        };
     }
 
     class UrlUtils {
