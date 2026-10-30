@@ -14,6 +14,28 @@ einen eigenen Patch-Workflow.
 verhindert einen hängen gebliebenen Hover-Zustand beim Wechsel in eine Webseite.
 Für diese Korrektur muss neben dem CSS auch der JS-Patch erneut angewendet werden.
 
+`workspace-command-highlight.js` ergänzt `CSS/web-panels.css`: Workspace-Kurzbefehle
+werden anhand des tatsächlich aktiven Workspaces im jeweiligen Fenster markiert.
+Unterstützt werden „Zum Arbeitsbereich N wechseln“ und Befehlsketten mit diesen
+Befehlen. Die Zuordnung folgt der Workspace-Reihenfolge, unabhängig von Namen,
+Icons und Themes. Der Mod liest Vivaldis internen Workspace-Zustand; nach größeren
+Vivaldi-Updates kann eine Anpassung erforderlich sein. Auch hierfür den JS-Patch
+erneut anwenden. Der Schritt „Zum Thema wechseln“ kann anschließend aus den
+Befehlsketten entfernt werden, wenn kein Theme-Wechsel mehr gewünscht ist.
+
+Der Mod startet automatisch in jedem Browserfenster. Ohne passende Kurzbefehle
+in der Seitenleiste werden keine Buttons markiert. Es gibt keine Timer und kein
+Polling: Der Mod hört auf Vivaldis Workspace-Store und Änderungen an Befehlsketten.
+Der DOM-Beobachter berücksichtigt nur Änderungen innerhalb der Seitenleiste sowie
+deren Austausch; andere UI-Änderungen lösen keine Neuberechnung aus.
+Die Befehlsketten-Zuordnung wird zwischengespeichert.
+
+Für die beiden Workspace-Kurzbefehle stehen im benachbarten CSS-Checkout
+`../CSS/icons/arbeit.svg` und `../CSS/icons/freizeit.svg` als eigene Symbole bereit.
+Die SVGs nutzen `currentColor` und übernehmen damit die
+Ribbon-Vordergrundfarbe. In Vivaldi diese Dateien als eigene Symbole für die
+Kurzbefehle auswählen. Die aktive Markierung zeichnet CSS auf den Button.
+
 ## Ordnerstruktur
 
 ```
