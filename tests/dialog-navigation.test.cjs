@@ -77,6 +77,7 @@ function selectionFixture({focusedTab, incognito = false, text = 'selected artic
     const search = vm.runInNewContext('({' + source.slice(start, end) + '})', {
         vivaldiWindowId: 22,
         window: {incognito},
+        UrlUtils: {fromSelection: value => (/^https?:\/\//i.test(value?.trim()) ? value.trim() : '')},
         document: {
             activeElement: {
                 closest: () =>
@@ -108,8 +109,10 @@ function selectionFixture({focusedTab, incognito = false, text = 'selected artic
     });
     search.getActiveWebview = () => null;
     search.searchEngineUtils = {incognito, defaultSearchId: 'default', privateSearchId: 'private', ready: Promise.resolve()};
+    const opened = [];
+    search.dialogTab = url => opened.push(url);
     search.dialogTabSearch = (...args) => searches.push(args);
-    return {search, queries, selections, searches};
+    return {search, queries, selections, searches, opened};
 }
 
 test('selection search reads the active tab in the owning window', async () => {
@@ -125,6 +128,34 @@ test('selection search uses the focused dialog or panel tab instead of the main 
     await fixture.search.searchForSelectedText();
     assert.deepEqual(fixture.queries, []);
     assert.deepEqual(fixture.selections, [303]);
+});
+
+test('only a selection that is exactly one URL counts as a link', () => {
+    const start = source.indexOf('    class UrlUtils {');
+    const end = source.indexOf('    class WebviewLinkInteractionUtils {', start);
+    const UrlUtils = vm.runInNewContext(source.slice(start, end) + '\nUrlUtils', {URL});
+    for (const [text, expected] of [
+        ['  https://example.test/a?b=c  ', 'https://example.test/a?b=c'],
+        ['vivaldi://settings', 'vivaldi://settings'],
+        ['www.example.com/path', 'https://www.example.com/path'],
+        ['Data: 5 Werte', ''],
+        ['About: uns', ''],
+        ['https://foo.de ist eine gute Seite', ''],
+        ['siehe https://foo.de', ''],
+        ['www.example', ''],
+        ['javascript:alert(1)', ''],
+        ['', ''],
+        [undefined, '']
+    ]) {
+        assert.equal(UrlUtils.fromSelection(text), expected, String(text));
+    }
+});
+
+test('selection shortcut opens a selected URL in the dialog instead of searching for it', async () => {
+    const fixture = selectionFixture({nativeText: '  https://example.test/article  '});
+    await fixture.search.searchForSelectedText();
+    assert.deepEqual(fixture.opened, ['https://example.test/article']);
+    assert.deepEqual(fixture.searches, []);
 });
 
 test('private selection search uses the private default engine', async () => {

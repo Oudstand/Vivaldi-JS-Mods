@@ -15,7 +15,10 @@
         CONTEXT_MENU_CONFIG = {
             menuPrefix: '[Dialog]',
             linkMenuTitle: 'Link öffnen',
-            searchMenuTitle: 'Suche nach "%s"',
+            // Fallback for when Vivaldi's internal onDocumentMenu event is unavailable
+            searchMenuTitle: 'Öffne oder suche "%s"',
+            openSelectionMenuTitle: 'Öffne "%s"',
+            searchSelectionMenuTitle: 'Suche nach "%s"',
             selectSearchMenuTitle: 'Suche mit'
         },
         TOOLTIP_CONFIG = {
@@ -180,8 +183,14 @@
                     }
                 });
             }
+            const selectedText = text?.trim();
+            const selectedUrl = UrlUtils.fromSelection(selectedText);
+            if (selectedUrl) {
+                this.dialogTab(selectedUrl);
+                return;
+            }
             const engineId = this.searchEngineUtils.incognito ? this.searchEngineUtils.privateSearchId : this.searchEngineUtils.defaultSearchId;
-            await this.dialogTabSearch(engineId, text?.trim() ? text : '');
+            await this.dialogTabSearch(engineId, selectedText ? text : '');
         }
 
         /**
@@ -976,6 +985,18 @@
             return this.VALID_URL_PREFIXES.some(prefix => trimmedUrl.startsWith(prefix));
         }
 
+        /**
+         * Stricter than isValid: selected prose such as "Data: 5 Werte" must stay a search
+         * @param {String} text the selected text
+         * @returns {String} the URL to open, or '' if the selection is not exactly one URL
+         */
+        static fromSelection(text) {
+            const selection = text?.trim() ?? '';
+            const url = /^www\.\S+\.\S+$/i.test(selection) ? `https://${selection}` : selection;
+            const isUrl = /^(?:https?|file|vivaldi|chrome|chrome-extension):\/\/\S+$/i.test(url) && URL.canParse(url);
+            return isUrl ? url : '';
+        }
+
         static async normalizeOrSearch(input, searchEngineUtils) {
             if (this.isValid(input)) return input.trim();
 
@@ -1730,6 +1751,16 @@
                 if (tab?.windowId !== undefined) dispatch(tab.windowId);
                 else core.chrome.windows.getLastFocused(focused => dispatch(focused.id));
             });
+            // Internal Vivaldi API, fires before the page menu is built. chrome.contextMenus has no such event.
+            core.vivaldi.contextMenu?.onDocumentMenu?.addListener((windowId, documentId, {selection}) => {
+                if (!selection) return;
+                const title = format(UrlUtils.fromSelection(selection) ? config.openSelectionMenuTitle : config.searchSelectionMenuTitle);
+                if (title === state.selectionTitle) return;
+                state.selectionTitle = title;
+                state.pending = state.pending
+                    .then(() => menuCall('update', 'search-dialog-tab', {title}))
+                    .catch(error => console.debug('Dialog mod: Failed to update selection menu title:', error));
+            });
             core.vivaldi.searchEngines.onTemplateUrlsChanged.addListener(update);
             update();
             return state;
@@ -1738,6 +1769,8 @@
         handleMenuClick({menuItemId, parentMenuItemId, linkUrl, selectionText}) {
             if (menuItemId === 'dialog-tab-link') return this.openLinkCallback(linkUrl);
             if (menuItemId === 'search-dialog-tab') {
+                const selectedUrl = UrlUtils.fromSelection(selectionText);
+                if (selectedUrl) return this.openLinkCallback(selectedUrl);
                 return this.searchCallback(this.incognito ? this.privateSearchId : this.defaultSearchId, selectionText);
             }
             if (parentMenuItemId === 'select-search-dialog-tab') {

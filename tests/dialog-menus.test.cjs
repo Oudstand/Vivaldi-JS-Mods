@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'dialog.js'), 'utf8');
 const classSource = source.slice(source.indexOf('    class SearchEngineUtils {'), source.indexOf('    class ReaderView {'));
 
 function fixture() {
-    const clicked = new Set(), changed = new Set(), menus = new Map(), calls = [], errors = [];
+    const clicked = new Set(), documentMenu = new Set(), changed = new Set(), menus = new Map(), calls = [], errors = [];
     const url = 'chrome-extension://vivaldi/main.html';
     const core = {location: {href: url}, chrome: {runtime: {}}, vivaldi: {}};
     let engines = {defaultSearch: 'normal', defaultPrivate: 'private', templateUrls: [{guid: 'one', name: 'First'}]};
@@ -18,6 +18,7 @@ function fixture() {
         fn();
         delete core.chrome.runtime.lastError;
     };
+    // Keep this limited to the real API: Chromium has neither onShown nor refresh.
     core.chrome.contextMenus = {
         onClicked: {addListener: fn => clicked.add(fn)},
         create(properties, fn) {
@@ -33,6 +34,7 @@ function fixture() {
         },
         remove(id, fn) {calls.push(['remove', id]); menus.delete(id); callback(fn);}
     };
+    core.vivaldi.contextMenu = {onDocumentMenu: {addListener: fn => documentMenu.add(fn)}};
     core.vivaldi.searchEngines = {
         getTemplateUrls: async () => engines,
         onTemplateUrlsChanged: {addListener: fn => changed.add(fn)}
@@ -41,19 +43,23 @@ function fixture() {
         const window = new EventTarget(); window.incognito = incognito;
         const Class = vm.runInNewContext(classSource + '\nSearchEngineUtils', {
             window, vivaldiWindowId: windowId,
+            UrlUtils: {fromSelection: value => (/^https?:\/\//i.test(value?.trim()) ? value.trim() : '')},
             chrome: {extension: {inIncognitoContext: incognito, getViews: () => [core]}, runtime: {getURL: () => url}},
             console: {debug: (...args) => errors.push(args)}
         });
         const links = [], searches = [];
         const instance = new Class(url => links.push(url), (...args) => searches.push(args), {
-            menuPrefix: '[Dialog]', linkMenuTitle: 'Open', searchMenuTitle: 'Search', selectSearchMenuTitle: 'Search with'
+            menuPrefix: '[Dialog]', linkMenuTitle: 'Open',
+            searchMenuTitle: 'Open or search "%s"', openSelectionMenuTitle: 'Open "%s"',
+            searchSelectionMenuTitle: 'Search "%s"', selectSearchMenuTitle: 'Search with'
         });
         return {instance, window, links, searches};
     }
-    return {client, clicked, changed, menus, calls, errors,
+    return {client, core, clicked, changed, menus, calls, errors,
         setEngines(value) {engines = value;},
         failCreate() {failCreate = true;},
         refresh() {for (const fn of changed) fn();},
+        openMenu(selection) {for (const fn of documentMenu) fn(1, 1, {selection});},
         click(info, windowId) {for (const fn of clicked) fn(info, {windowId});}
     };
 }
@@ -68,6 +74,9 @@ test('all windows share one set of menus and listeners, with clicks routed to th
     assert.deepEqual(first.links, []);
     assert.deepEqual(second.links, ['https://example.test/']);
     f.click({menuItemId: 'search-dialog-tab', selectionText: 'secret'}, 2);
+    assert.deepEqual(second.searches, [['private', 'secret']]);
+    f.click({menuItemId: 'search-dialog-tab', selectionText: '  https://example.test/article  '}, 2);
+    assert.deepEqual(second.links, ['https://example.test/', 'https://example.test/article']);
     assert.deepEqual(second.searches, [['private', 'secret']]);
     f.click({menuItemId: 'select-search-dialog-tabone', parentMenuItemId: 'select-search-dialog-tab', selectionText: 'term'}, 1);
     assert.deepEqual(first.searches, [['one', 'term']]);
@@ -86,6 +95,39 @@ test('closing the first window keeps menus usable in other and subsequently open
     const third = f.client(3); await third.instance.ready;
     assert.equal(f.calls.filter(([method]) => method === 'create').length, 4);
     assert.equal(f.clicked.size, 1);
+});
+
+test('menus are created with only the contextMenus API Chromium provides', async () => {
+    const f = fixture(), client = f.client(1);
+    await client.instance.ready;
+    assert.equal(f.menus.get('search-dialog-tab').title, '[Dialog] Open or search "%s"');
+    assert.deepEqual(f.errors, []);
+});
+
+test('the selection entry title follows the selection when the page menu opens', async () => {
+    const f = fixture(), client = f.client(1);
+    await client.instance.ready;
+    const title = async selection => {
+        f.openMenu(selection);
+        await client.instance.ready;
+        return f.menus.get('search-dialog-tab').title;
+    };
+    assert.equal(await title('https://example.test/'), '[Dialog] Open "%s"');
+    assert.equal(await title('ordinary text'), '[Dialog] Search "%s"');
+    const updates = f.calls.length;
+    assert.equal(await title('more text'), '[Dialog] Search "%s"');
+    assert.equal(f.calls.length, updates);
+    assert.equal(await title(''), '[Dialog] Search "%s"');
+    assert.deepEqual(f.errors, []);
+});
+
+test('menus keep working when the internal Vivaldi menu event is unavailable', async () => {
+    const f = fixture();
+    delete f.core.vivaldi.contextMenu;
+    const client = f.client(1);
+    await client.instance.ready;
+    assert.equal(f.menus.get('search-dialog-tab').title, '[Dialog] Open or search "%s"');
+    assert.deepEqual(f.errors, []);
 });
 
 test('entries left by an earlier UI instance are adopted without duplicate creation', async () => {

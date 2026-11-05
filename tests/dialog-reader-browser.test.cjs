@@ -118,7 +118,7 @@ const http = require('node:http');
 
   const selectionStart=source.indexOf('        async searchForSelectedText() {');
   const selectionMethod=source.slice(selectionStart,source.indexOf('\n        /**',selectionStart));
-  await evaluate(`window.__selectionProbe=({${selectionMethod}});__selectionProbe.searchEngineUtils={defaultSearchId:'test',ready:Promise.resolve()};__selectionProbe.getActiveWebview=()=>__readerProbe.webview;__selectionProbe.dialogTabSearch=(engine,text)=>{window.__selectedReaderText=text;};__readerProbe.webview.focus()`);
+  await evaluate(`window.UrlUtils={fromSelection:()=>''};window.__selectionProbe=({${selectionMethod}});__selectionProbe.searchEngineUtils={defaultSearchId:'test',ready:Promise.resolve()};__selectionProbe.getActiveWebview=()=>__readerProbe.webview;__selectionProbe.dialogTabSearch=(engine,text)=>{window.__selectedReaderText=text;};__readerProbe.webview.focus()`);
   const selectedReaderText=await evaluate(`(()=>{const paragraph=Array.from(document.querySelectorAll('#reader-article p')).find(p=>p.textContent.includes('Section 0:'));window.getSelection().selectAllChildren(paragraph);return window.getSelection().toString();})()`,readerSession);
   await evaluate('__selectionProbe.searchForSelectedText()');
   if(await evaluate('__selectedReaderText')!==selectedReaderText)throw new Error('Selection search lost the native reader selection');
