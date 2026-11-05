@@ -12,16 +12,30 @@ test('input searches use the window default and wait for search-engine initializ
     for (const incognito of [false, true]) {
         const calls = [];
         let ready;
-        const engines = {incognito, ready: new Promise(resolve => {ready = resolve;})};
+        const engines = {
+            incognito,
+            ready: new Promise(resolve => {
+                ready = resolve;
+            })
+        };
         const UrlUtils = vm.runInNewContext(source.slice(start, end) + '\nUrlUtils', {
-            URL, window: {incognito}, vivaldi: {searchEngines: {getSearchRequest: async (...args) => {
-                calls.push(args); return {url: 'https://search.test/result'};
-            }}}
+            URL,
+            window: {incognito},
+            vivaldi: {
+                searchEngines: {
+                    getSearchRequest: async (...args) => {
+                        calls.push(args);
+                        return {url: 'https://search.test/result'};
+                    }
+                }
+            }
         });
         assert.equal(await UrlUtils.normalizeOrSearch(' https://example.test/ ', engines), 'https://example.test/');
         const pending = UrlUtils.normalizeOrSearch('query', engines);
         assert.deepEqual(calls, []);
-        engines.defaultSearchId = 'normal'; engines.privateSearchId = 'private'; ready();
+        engines.defaultSearchId = 'normal';
+        engines.privateSearchId = 'private';
+        ready();
         assert.equal(await pending, 'https://search.test/result');
         assert.deepEqual(calls, [[incognito ? 'private' : 'normal', 'query']]);
     }
@@ -30,15 +44,24 @@ test('input searches use the window default and wait for search-engine initializ
 test('cleanup continues after errors and remains safe when repeated or registered late', () => {
     const start = source.indexOf('    class DialogLifetime {');
     const end = source.indexOf('    class DialogMod {', start);
-    const errors = [], calls = [];
+    const errors = [],
+        calls = [];
     const DialogLifetime = vm.runInNewContext(source.slice(start, end) + '\nDialogLifetime', {
-        AbortController, console: {debug: (...args) => errors.push(args)}
+        AbortController,
+        console: {debug: (...args) => errors.push(args)}
     });
     const lifetime = new DialogLifetime();
-    lifetime.add(() => {calls.push('first'); throw new Error('First failed');});
+    lifetime.add(() => {
+        calls.push('first');
+        throw new Error('First failed');
+    });
     lifetime.add(() => calls.push('second'));
-    lifetime.dispose(); lifetime.dispose();
-    lifetime.add(() => {calls.push('late'); throw new Error('Late failed');});
+    lifetime.dispose();
+    lifetime.dispose();
+    lifetime.add(() => {
+        calls.push('late');
+        throw new Error('Late failed');
+    });
     lifetime.add(() => calls.push('last'));
     assert.deepEqual(calls, ['first', 'second', 'late', 'last']);
     assert.equal(errors.length, 2);
@@ -46,16 +69,42 @@ test('cleanup continues after errors and remains safe when repeated or registere
 });
 
 function selectionFixture({focusedTab, incognito = false, text = 'selected article text', nativeText = text, frameTexts = [text], tabs = [{id: 202}]} = {}) {
-    const queries = [], selections = [], searches = [];
+    const queries = [],
+        selections = [],
+        searches = [];
     const start = source.indexOf('        async searchForSelectedText() {');
     const end = source.indexOf('\n        /**', start);
     const search = vm.runInNewContext('({' + source.slice(start, end) + '})', {
-        vivaldiWindowId: 22, window: {incognito},
-        document: {activeElement: {closest: () => focusedTab === undefined ? null : {
-            tab_id: focusedTab, executeScript: (options, callback) => callback(frameTexts)
-        }}},
-        chrome: {runtime: {}, tabs: {query: async options => {queries.push({...options}); return tabs;}}},
-        vivaldi: {utilities: {getSelectedText: async id => {selections.push(id); return nativeText;}}}
+        vivaldiWindowId: 22,
+        window: {incognito},
+        document: {
+            activeElement: {
+                closest: () =>
+                    focusedTab === undefined
+                        ? null
+                        : {
+                              tab_id: focusedTab,
+                              executeScript: (options, callback) => callback(frameTexts)
+                          }
+            }
+        },
+        chrome: {
+            runtime: {},
+            tabs: {
+                query: async options => {
+                    queries.push({...options});
+                    return tabs;
+                }
+            }
+        },
+        vivaldi: {
+            utilities: {
+                getSelectedText: async id => {
+                    selections.push(id);
+                    return nativeText;
+                }
+            }
+        }
     });
     search.getActiveWebview = () => null;
     search.searchEngineUtils = {incognito, defaultSearchId: 'default', privateSearchId: 'private', ready: Promise.resolve()};
@@ -133,7 +182,11 @@ test('completion of an earlier navigation cannot hide a new loading indicator', 
         document: {createElement: () => ({style: {}, classList: {add() {}, remove() {}}, setAttribute() {}})},
         requestAnimationFrame: () => ++nextId,
         cancelAnimationFrame() {},
-        setTimeout: fn => {const id = ++nextId; timers.set(id, fn); return id;},
+        setTimeout: fn => {
+            const id = ++nextId;
+            timers.set(id, fn);
+            return id;
+        },
         clearTimeout: id => timers.delete(id)
     });
     const advanceTimers = () => {

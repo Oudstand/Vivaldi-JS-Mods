@@ -78,8 +78,11 @@
         }
 
         #cleanup(cleanupFn) {
-            try { cleanupFn(); }
-            catch (error) { console.debug('Dialog mod: Cleanup failed:', error); }
+            try {
+                cleanupFn();
+            } catch (error) {
+                console.debug('Dialog mod: Cleanup failed:', error);
+            }
         }
     }
 
@@ -172,7 +175,9 @@
                             const failed = Boolean(chrome.runtime.lastError);
                             resolve(failed ? '' : results?.find(Boolean) || '');
                         });
-                    } catch { resolve(''); }
+                    } catch {
+                        resolve('');
+                    }
                 });
             }
             const engineId = this.searchEngineUtils.incognito ? this.searchEngineUtils.privateSearchId : this.searchEngineUtils.defaultSearchId;
@@ -418,9 +423,13 @@
             optionsContainer.addEventListener('mouseenter', showOptions, {signal: lifetime.signal});
             optionsContainer.addEventListener('mouseleave', showTitle, {signal: lifetime.signal});
             optionsContainer.addEventListener('focusin', showOptions, {signal: lifetime.signal});
-            optionsContainer.addEventListener('focusout', event => {
-                if (!optionsContainer.contains(event.relatedTarget)) showTitle();
-            }, {signal: lifetime.signal});
+            optionsContainer.addEventListener(
+                'focusout',
+                event => {
+                    if (!optionsContainer.contains(event.relatedTarget)) showTitle();
+                },
+                {signal: lifetime.signal}
+            );
             //#endregion
 
             //#region webview properties
@@ -689,8 +698,18 @@
 
                 const fragment = document.createDocumentFragment(),
                     buttons = [
-                        {content: this.iconUtils.back, action: () => this.navigateWebviewHistory(webview, 'back'), cls: 'history-back', tooltip: TOOLTIP_CONFIG.back},
-                        {content: this.iconUtils.forward, action: () => this.navigateWebviewHistory(webview, 'forward'), cls: 'history-forward', tooltip: TOOLTIP_CONFIG.forward},
+                        {
+                            content: this.iconUtils.back,
+                            action: () => this.navigateWebviewHistory(webview, 'back'),
+                            cls: 'history-back',
+                            tooltip: TOOLTIP_CONFIG.back
+                        },
+                        {
+                            content: this.iconUtils.forward,
+                            action: () => this.navigateWebviewHistory(webview, 'forward'),
+                            cls: 'history-forward',
+                            tooltip: TOOLTIP_CONFIG.forward
+                        },
                         {content: this.iconUtils.reload, action: () => webview.reload(), tooltip: TOOLTIP_CONFIG.reload},
                         {
                             content: this.iconUtils.readerView,
@@ -828,15 +847,22 @@
 
         static createBridge(core) {
             let require;
-            core.webpackChunkgapp_browser_react.push([[`dialog-gestures-${crypto.randomUUID()}`], {}, runtime => { require = runtime; }]);
+            core.webpackChunkgapp_browser_react.push([
+                [`dialog-gestures-${crypto.randomUUID()}`],
+                {},
+                runtime => {
+                    require = runtime;
+                }
+            ]);
             const id = Object.keys(require.m).find(id => require.m[id].toString().includes('getCommandsForGestures(){'));
             const commands = id && Object.values(require(id)).find(value => typeof value?.getCommandsForGestures === 'function');
             const clicks = core.vivaldi.tabsPrivate.onWebviewClickCheck;
             if (!commands || !clicks) throw new Error('Vivaldi gesture commands unavailable');
 
-            const views = new Map(), targets = new Map();
-            const usable = entry => !entry.lifetime.signal.aborted && entry.divContainer.dataset.closing !== '1'
-                && entry.webview.checkVisibility({visibilityProperty: true});
+            const views = new Map(),
+                targets = new Map();
+            const usable = entry =>
+                !entry.lifetime.signal.aborted && entry.divContainer.dataset.closing !== '1' && entry.webview.checkVisibility({visibilityProperty: true});
             // Vivaldi reports the original press even when the pointer later leaves the dialog.
             const onClick = (windowId, down, button, x, y) => {
                 if (!down) return;
@@ -882,7 +908,7 @@
             try {
                 commands.getCommandsForGestures = getCommands;
                 clicks.addListener(onClick);
-                return core[this.#key] = {views, targets, restore};
+                return (core[this.#key] = {views, targets, restore});
             } catch (error) {
                 restore();
                 throw error;
@@ -894,8 +920,7 @@
         constructor({webview, divContainer, lifetime}) {
             const onMessage = (message, sender) => {
                 if (message?.type !== 'dialog-mouse-navigation' || sender.tab?.id !== Number(webview.tab_id)) return;
-                if (lifetime.signal.aborted || divContainer.dataset.closing === '1'
-                    || !webview.checkVisibility({visibilityProperty: true})) return;
+                if (lifetime.signal.aborted || divContainer.dataset.closing === '1' || !webview.checkVisibility({visibilityProperty: true})) return;
                 if (message.button === 3) webview.back();
                 else if (message.button === 4) webview.forward();
             };
@@ -904,8 +929,9 @@
 
             const code = `(${DialogMouseButtons.installInPage.toString()})();`;
             // Register future documents and frames; also cover the already-created related tab.
-            webview.addContentScripts([{name: 'dialog-mouse-navigation', matches: ['<all_urls>'],
-                js: {code}, run_at: 'document_start', all_frames: true, match_about_blank: true}]);
+            webview.addContentScripts([
+                {name: 'dialog-mouse-navigation', matches: ['<all_urls>'], js: {code}, run_at: 'document_start', all_frames: true, match_about_blank: true}
+            ]);
             const inject = () => {
                 if (lifetime.signal.aborted) return;
                 webview.executeScript({code, allFrames: true}, () => {
@@ -1120,12 +1146,12 @@
                 const target = Number.isInteger(frameId) ? {tabId, frameIds: [frameId]} : {tabId, allFrames: true};
                 try {
                     // DOM work stays in the extension world, where closed shadow roots are accessible.
-                    await chrome.scripting.executeScript({target, world: 'ISOLATED', injectImmediately: true,
-                        func: DialogFullscreen.installController});
+                    await chrome.scripting.executeScript({target, world: 'ISOLATED', injectImmediately: true, func: DialogFullscreen.installController});
                     if (lifetime.signal.aborted) return;
-                    await chrome.scripting.executeScript({target, world: 'MAIN', injectImmediately: true,
-                        func: DialogFullscreen.installInPage});
-                } catch (error) { console.debug('Dialog mod: Fullscreen injection failed:', error); }
+                    await chrome.scripting.executeScript({target, world: 'MAIN', injectImmediately: true, func: DialogFullscreen.installInPage});
+                } catch (error) {
+                    console.debug('Dialog mod: Fullscreen injection failed:', error);
+                }
             };
             const onCommitted = details => {
                 if (details.tabId === Number(webview.tab_id)) inject(details.frameId);
@@ -1143,26 +1169,31 @@
             let sequence = 0;
             const pending = new Map();
             window.addEventListener('dialog-fullscreen-result', event => {
-                const result = event.detail, request = pending.get(result?.id);
+                const result = event.detail,
+                    request = pending.get(result?.id);
                 if (!request) return;
                 pending.delete(result.id);
                 if (result.error) request.reject(new TypeError(result.error));
                 else request.resolve();
             });
-            const request = (action, element) => new Promise((resolve, reject) => {
-                const id = `dialog-${++sequence}`;
-                const marker = element?.getAttribute('data-dialog-fullscreen-request');
-                pending.set(id, {resolve, reject});
-                element?.setAttribute('data-dialog-fullscreen-request', id);
-                try { window.dispatchEvent(new CustomEvent('dialog-fullscreen-request', {detail: {id, action}})); }
-                finally {
-                    if (element) {
-                        if (marker === null) element.removeAttribute('data-dialog-fullscreen-request');
-                        else element.setAttribute('data-dialog-fullscreen-request', marker);
+            const request = (action, element) =>
+                new Promise((resolve, reject) => {
+                    const id = `dialog-${++sequence}`;
+                    const marker = element?.getAttribute('data-dialog-fullscreen-request');
+                    pending.set(id, {resolve, reject});
+                    element?.setAttribute('data-dialog-fullscreen-request', id);
+                    try {
+                        window.dispatchEvent(new CustomEvent('dialog-fullscreen-request', {detail: {id, action}}));
+                    } finally {
+                        if (element) {
+                            if (marker === null) element.removeAttribute('data-dialog-fullscreen-request');
+                            else element.setAttribute('data-dialog-fullscreen-request', marker);
+                        }
                     }
-                }
-            });
-            Element.prototype.requestFullscreen = function () { return request('enter', this); };
+                });
+            Element.prototype.requestFullscreen = function () {
+                return request('enter', this);
+            };
             const fullscreenElement = root => {
                 const session = document.documentElement.getAttribute('data-dialog-fullscreen');
                 if (!session) return null;
@@ -1170,7 +1201,10 @@
             };
             Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => fullscreenElement(document)});
             Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', {
-                configurable: true, get() { return fullscreenElement(this); }
+                configurable: true,
+                get() {
+                    return fullscreenElement(this);
+                }
             });
             Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(fullscreenElement(document))});
             document.exitFullscreen = () => request('exit');
@@ -1200,15 +1234,16 @@
                 border-radius: 0 !important;
                 -webkit-mask-image: none !important; mask-image: none !important;
             }`;
-            const notify = element => (element.isConnected ? element : document)
-                .dispatchEvent(new Event('fullscreenchange', {bubbles: true, composed: true}));
+            const notify = element => (element.isConnected ? element : document).dispatchEvent(new Event('fullscreenchange', {bubbles: true, composed: true}));
             const send = (target, action, sessionId, fromEscape = false) => {
                 target.postMessage({type: messageType, action, session: sessionId, fromEscape}, '*');
             };
             const observer = new MutationObserver(() => getActive());
             const exit = ({fromEscape = false, notifyParent = true, notifyChild = true} = {}) => {
                 if (!active) return Promise.resolve();
-                const element = active, child = activeChild, endedSession = session;
+                const element = active,
+                    child = activeChild,
+                    endedSession = session;
                 active = activeChild = session = null;
                 observer.disconnect();
                 restore();
@@ -1304,15 +1339,15 @@
             window.addEventListener('dialog-fullscreen-request', event => {
                 const {id, action} = event.detail || {};
                 if (typeof id !== 'string' || !['enter', 'exit'].includes(action)) return;
-                const element = action === 'enter' && findElement(document,
-                    candidate => candidate.getAttribute('data-dialog-fullscreen-request') === id);
+                const element = action === 'enter' && findElement(document, candidate => candidate.getAttribute('data-dialog-fullscreen-request') === id);
                 const operation = action === 'exit' ? exit() : element ? enter(element) : Promise.reject(new TypeError('Fullscreen element is detached'));
-                operation.then(() => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id}})),
-                    error => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id, error: error.message}})));
+                operation.then(
+                    () => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id}})),
+                    error => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id, error: error.message}}))
+                );
             });
 
-            const findFrame = source => findElement(document, element =>
-                ['IFRAME', 'FRAME'].includes(element.tagName) && element.contentWindow === source);
+            const findFrame = source => findElement(document, element => ['IFRAME', 'FRAME'].includes(element.tagName) && element.contentWindow === source);
             window.addEventListener('message', event => {
                 const message = event.data;
                 if (message?.type !== messageType || typeof message.session !== 'string' || !event.source) return;
@@ -1324,20 +1359,23 @@
                     // Compare WindowProxy identities; this also works across origins.
                     const frame = findFrame(event.source);
                     if (!frame) return;
-                    enter(frame, {window: event.source, session: message.session})
-                        .catch(() => send(event.source, 'exit', message.session));
+                    enter(frame, {window: event.source, session: message.session}).catch(() => send(event.source, 'exit', message.session));
                 } else if (message.action === 'exit' && activeChild?.window === event.source && activeChild.session === message.session) {
                     exit({fromEscape: message.fromEscape === true, notifyChild: false});
                 }
             });
             window.addEventListener('dialog-fullscreen-exit', () => exit({fromEscape: true}));
             window.addEventListener('pagehide', () => exit());
-            window.addEventListener('keydown', event => {
-                if (event.key !== 'Escape' || !getActive()) return;
-                event.preventDefault();
-                event.stopImmediatePropagation();
-                exit({fromEscape: true});
-            }, true);
+            window.addEventListener(
+                'keydown',
+                event => {
+                    if (event.key !== 'Escape' || !getActive()) return;
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    exit({fromEscape: true});
+                },
+                true
+            );
         };
     }
 
@@ -1617,54 +1655,72 @@
             if (!core) throw new Error('Vivaldi shared context unavailable');
             this.shared = core[SearchEngineUtils.#sharedKey] ||= SearchEngineUtils.#createShared(core, config);
             this.shared.clients.set(vivaldiWindowId, this);
-            window.addEventListener('unload', () => {
-                if (this.shared.clients.get(vivaldiWindowId) === this) this.shared.clients.delete(vivaldiWindowId);
-            }, {once: true});
+            window.addEventListener(
+                'unload',
+                () => {
+                    if (this.shared.clients.get(vivaldiWindowId) === this) this.shared.clients.delete(vivaldiWindowId);
+                },
+                {once: true}
+            );
         }
 
-        get ready() { return this.shared.pending; }
-        get defaultSearchId() { return this.shared.defaultSearchId; }
-        get privateSearchId() { return this.shared.privateSearchId; }
+        get ready() {
+            return this.shared.pending;
+        }
+        get defaultSearchId() {
+            return this.shared.defaultSearchId;
+        }
+        get privateSearchId() {
+            return this.shared.privateSearchId;
+        }
 
         static #createShared(core, config) {
             const state = {clients: new Map(), menus: new Map(), pending: Promise.resolve()};
             const menuApi = core.chrome.contextMenus;
-            const menuCall = (method, ...args) => new Promise((resolve, reject) => {
-                menuApi[method](...args, () => {
-                    const error = core.chrome.runtime.lastError;
-                    if (error) reject(new Error(error.message));
-                    else resolve();
+            const menuCall = (method, ...args) =>
+                new Promise((resolve, reject) => {
+                    menuApi[method](...args, () => {
+                        const error = core.chrome.runtime.lastError;
+                        if (error) reject(new Error(error.message));
+                        else resolve();
+                    });
                 });
-            });
-            const format = title => config.menuPrefix ? `${config.menuPrefix} ${title}` : title;
-            const update = () => state.pending = state.pending.then(async () => {
-                const engines = await core.vivaldi.searchEngines.getTemplateUrls();
-                state.defaultSearchId = engines.defaultSearch;
-                state.privateSearchId = engines.defaultPrivate;
-                const desired = new Map([
-                    ['dialog-tab-link', {title: format(config.linkMenuTitle), contexts: ['link']}],
-                    ['search-dialog-tab', {title: format(config.searchMenuTitle), contexts: ['selection']}],
-                    ['select-search-dialog-tab', {title: format(config.selectSearchMenuTitle), contexts: ['selection']}],
-                    ...engines.templateUrls.map(engine => ['select-search-dialog-tab' + engine.guid,
-                        {parentId: 'select-search-dialog-tab', title: engine.name, contexts: ['selection']}])
-                ]);
-                for (const id of state.menus.keys()) {
-                    if (!desired.has(id)) {
-                        await menuCall('remove', id);
-                        state.menus.delete(id);
-                    }
-                }
-                for (const [id, properties] of desired) {
-                    const signature = JSON.stringify(properties);
-                    if (!state.menus.has(id)) {
-                        // Entries can outlive a UI reload; adopt them before trying to create new ones.
-                        try { await menuCall('update', id, properties); }
-                        catch { await menuCall('create', {id, ...properties}); }
-                    }
-                    else if (state.menus.get(id) !== signature) await menuCall('update', id, properties);
-                    state.menus.set(id, signature);
-                }
-            }).catch(error => console.debug('Dialog mod: Failed to update search menus:', error));
+            const format = title => (config.menuPrefix ? `${config.menuPrefix} ${title}` : title);
+            const update = () =>
+                (state.pending = state.pending
+                    .then(async () => {
+                        const engines = await core.vivaldi.searchEngines.getTemplateUrls();
+                        state.defaultSearchId = engines.defaultSearch;
+                        state.privateSearchId = engines.defaultPrivate;
+                        const desired = new Map([
+                            ['dialog-tab-link', {title: format(config.linkMenuTitle), contexts: ['link']}],
+                            ['search-dialog-tab', {title: format(config.searchMenuTitle), contexts: ['selection']}],
+                            ['select-search-dialog-tab', {title: format(config.selectSearchMenuTitle), contexts: ['selection']}],
+                            ...engines.templateUrls.map(engine => [
+                                'select-search-dialog-tab' + engine.guid,
+                                {parentId: 'select-search-dialog-tab', title: engine.name, contexts: ['selection']}
+                            ])
+                        ]);
+                        for (const id of state.menus.keys()) {
+                            if (!desired.has(id)) {
+                                await menuCall('remove', id);
+                                state.menus.delete(id);
+                            }
+                        }
+                        for (const [id, properties] of desired) {
+                            const signature = JSON.stringify(properties);
+                            if (!state.menus.has(id)) {
+                                // Entries can outlive a UI reload; adopt them before trying to create new ones.
+                                try {
+                                    await menuCall('update', id, properties);
+                                } catch {
+                                    await menuCall('create', {id, ...properties});
+                                }
+                            } else if (state.menus.get(id) !== signature) await menuCall('update', id, properties);
+                            state.menus.set(id, signature);
+                        }
+                    })
+                    .catch(error => console.debug('Dialog mod: Failed to update search menus:', error)));
 
             menuApi.onClicked.addListener((info, tab) => {
                 const dispatch = windowId => {
@@ -1704,31 +1760,41 @@
                 if (!mounted) return;
                 const {renderer, actions} = mounted;
                 mounted = undefined;
-                try { renderer?.unmount(); }
-                finally {
+                try {
+                    renderer?.unmount();
+                } finally {
                     actions.views.delete(root);
                     if (actions.views.size === 0) actions.restore();
                 }
             };
-            webview.addEventListener('loadcommit', event => {
-                if (event.isTopLevel === false) return;
-                root.hidden = !ReaderView.isReaderUrl(event.url || webview.src);
-                if (root.hidden) return dispose();
-                if (mounted) return;
-                try {
-                    const native = ReaderView.getNativeControls(webview);
-                    const actions = ReaderView.getNativeActions(native);
-                    mounted = {actions};
-                    actions.views.set(root, {webview, windowId: native.window.vivaldiWindowId});
-                    mounted.renderer = native.ReactDOM.createRoot(root);
-                    actions.api.setReaderModeStyle(native.window.vivaldiWindowId, Number(webview.tab_id));
-                    mounted.renderer.render(native.React.createElement(native.context.Provider, {value: native.window},
-                        native.React.createElement(native.element.type, {...native.element.props, pageId: Number(webview.tab_id)})));
-                } catch (error) {
-                    dispose();
-                    console.debug('Dialog mod: Native reader controls unavailable:', error);
-                }
-            }, {signal});
+            webview.addEventListener(
+                'loadcommit',
+                event => {
+                    if (event.isTopLevel === false) return;
+                    root.hidden = !ReaderView.isReaderUrl(event.url || webview.src);
+                    if (root.hidden) return dispose();
+                    if (mounted) return;
+                    try {
+                        const native = ReaderView.getNativeControls(webview);
+                        const actions = ReaderView.getNativeActions(native);
+                        mounted = {actions};
+                        actions.views.set(root, {webview, windowId: native.window.vivaldiWindowId});
+                        mounted.renderer = native.ReactDOM.createRoot(root);
+                        actions.api.setReaderModeStyle(native.window.vivaldiWindowId, Number(webview.tab_id));
+                        mounted.renderer.render(
+                            native.React.createElement(
+                                native.context.Provider,
+                                {value: native.window},
+                                native.React.createElement(native.element.type, {...native.element.props, pageId: Number(webview.tab_id)})
+                            )
+                        );
+                    } catch (error) {
+                        dispose();
+                        console.debug('Dialog mod: Native reader controls unavailable:', error);
+                    }
+                },
+                {signal}
+            );
             signal.addEventListener('abort', dispose, {once: true});
             window.addEventListener('unload', dispose, {once: true, signal});
             return root;
@@ -1753,25 +1819,36 @@
                 if (!view || !container) continue;
                 // Read a render description to obtain the original component without changing the native view.
                 const preview = Object.assign(Object.create(view), {
-                    props: {...view.props, id: Number(webview.tab_id), url: 'chrome://reader/',
-                        prefValues: {...view.props.prefValues, 'vivaldi.webpages.reader.controls': true}},
+                    props: {
+                        ...view.props,
+                        id: Number(webview.tab_id),
+                        url: 'chrome://reader/',
+                        prefValues: {...view.props.prefValues, 'vivaldi.webpages.reader.controls': true}
+                    },
                     state: {...view.state, dockingState: 'off'}
                 });
                 const element = findControls(preview.render());
                 if (!element || !view.constructor.contextType?.Provider) continue;
                 const core = (container.ownerDocument || container).defaultView;
                 let require;
-                core.webpackChunkgapp_browser_react.push([[`dialog-reader-${crypto.randomUUID()}`], {}, runtime => { require = runtime; }]);
+                core.webpackChunkgapp_browser_react.push([
+                    [`dialog-reader-${crypto.randomUUID()}`],
+                    {},
+                    runtime => {
+                        require = runtime;
+                    }
+                ]);
                 const moduleWith = marker => {
                     const id = Object.keys(require.m).find(id => require.m[id].toString().includes(marker));
                     if (!id) throw new Error(`Vivaldi module unavailable: ${marker}`);
                     return require(id);
                 };
-                const React = moduleWith('.createElement=function'), ReactDOM = moduleWith('.createRoot=function');
+                const React = moduleWith('.createElement=function'),
+                    ReactDOM = moduleWith('.createRoot=function');
                 if (typeof React?.createElement !== 'function' || typeof ReactDOM?.createRoot !== 'function') {
                     throw new Error('Vivaldi reader renderer unavailable');
                 }
-                return ReaderView.#native = {core, require, element, context: view.constructor.contextType, window: view.context, React, ReactDOM};
+                return (ReaderView.#native = {core, require, element, context: view.constructor.contextType, window: view.context, React, ReactDOM});
             }
             throw new Error('Vivaldi reader component not found');
         }
@@ -1788,17 +1865,20 @@
             if (!api || !pages || typeof themes?.addListener !== 'function' || typeof themes?.removeListener !== 'function') {
                 throw new Error('Vivaldi reader context unavailable');
             }
-            const views = new Map(), original = api.setReaderModeStyle;
+            const views = new Map(),
+                original = api.setReaderModeStyle;
             const apply = function (windowId, pageId, ...args) {
                 const dialog = [...views.values()].find(({webview}) => Number(webview.tab_id) === pageId);
                 if (!dialog) return original.call(this, windowId, pageId, ...args);
                 // Hidden panel tabs are absent from the native page store. Supply their context only during this reader call.
-                const lookup = pages.getPageById, own = Object.hasOwn(pages, 'getPageById');
+                const lookup = pages.getPageById,
+                    own = Object.hasOwn(pages, 'getPageById');
                 pages.getPageById = function (id, ...args) {
                     return lookup.call(this, id, ...args) || (id === pageId ? {id, windowId, url: dialog.webview.src} : undefined);
                 };
-                try { return original.call(this, windowId, pageId, ...args); }
-                finally {
+                try {
+                    return original.call(this, windowId, pageId, ...args);
+                } finally {
                     if (own) pages.getPageById = lookup;
                     else delete pages.getPageById;
                 }
@@ -1807,8 +1887,9 @@
                 for (const {webview, windowId} of views.values()) api.setReaderModeStyle(windowId, Number(webview.tab_id));
             };
             const restore = () => {
-                try { themes.removeListener(refresh); }
-                finally {
+                try {
+                    themes.removeListener(refresh);
+                } finally {
                     if (api.setReaderModeStyle === apply) api.setReaderModeStyle = original;
                     if (core[ReaderView.#actionsKey]?.apply === apply) delete core[ReaderView.#actionsKey];
                 }
@@ -1816,7 +1897,7 @@
             try {
                 api.setReaderModeStyle = apply;
                 themes.addListener(refresh);
-                return core[ReaderView.#actionsKey] = {core, api, original, apply, themes, refresh, views, restore};
+                return (core[ReaderView.#actionsKey] = {core, api, original, apply, themes, refresh, views, restore});
             } catch (error) {
                 restore();
                 throw error;
@@ -1839,7 +1920,9 @@
             try {
                 const current = new URL(currentUrl);
                 article = isReader ? new URL(current.searchParams.get('path')) : current;
-            } catch { return; }
+            } catch {
+                return;
+            }
             if (!['http:', 'https:'].includes(article.protocol)) return;
 
             if (isReader) {
