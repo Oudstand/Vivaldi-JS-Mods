@@ -77,7 +77,11 @@ setlocal enabledelayedexpansion
 
 
 
-type *.js > !latestVersionFolder!\custom.js
+rem Same as patch.sh: the extra ';' keeps the concatenation safe against missing semicolons.
+(for %%F in (*.js) do (
+  type "%%F"
+  echo ;
+)) > "!latestVersionFolder!\custom.js"
 move /Y temp.txt "!latestVersionFolder!window.html"
 del temp0.txt
 echo.

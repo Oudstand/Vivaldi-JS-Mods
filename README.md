@@ -36,6 +36,26 @@ Die SVGs nutzen `currentColor` und übernehmen damit die
 Ribbon-Vordergrundfarbe. In Vivaldi diese Dateien als eigene Symbole für die
 Kurzbefehle auswählen. Die aktive Markierung zeichnet CSS auf den Button.
 
+`dialog.js` öffnet Links und Suchen in einem Dialog über der aktuellen Seite: per
+gehaltener mittlerer Maustaste, über das Kontextmenü oder per Kurzbefehl. Einstellungen
+stehen als Konstanten am Anfang der Datei, zum Beispiel `ICON_CONFIG` und `CONTEXT_MENU_CONFIG`.
+
+| Kurzbefehl | Wirkung |
+|---|---|
+| `Ctrl+Alt+.` oder `Ctrl+Shift+F` | Öffnet die markierte URL im Dialog, sucht anderen markierten Text oder öffnet ohne Auswahl die Standardsuchmaschine |
+| `Esc` | Beendet Vollbild im Dialog oder schließt ihn |
+
+Als URL gilt nur eine Auswahl, die genau aus einer URL besteht, auch ohne Schema
+mit `www.`. Alles andere wird gesucht, also auch `siehe https://example.com`.
+Der Kontextmenü-Eintrag zeigt entsprechend `Öffne "…"` oder `Suche nach "…"`.
+
+Der Mod nutzt interne Vivaldi-Schnittstellen, nach größeren Vivaldi-Updates kann
+also eine Anpassung nötig sein. Der wechselnde Menütitel hängt an
+`vivaldi.contextMenu.onDocumentMenu`. Fehlt dieses Event, zeigt der Eintrag
+`Öffne oder suche "…"`. Scheitert die Einrichtung des Kontextmenüs ganz, fehlen nur
+dessen Einträge; Kurzbefehle und Dialoge funktionieren weiter. Der Fehler steht dann
+in der Konsole der Vivaldi-Oberfläche.
+
 ## Ordnerstruktur
 
 ```
@@ -48,6 +68,7 @@ Kurzbefehle auswählen. Die aktive Markierung zeichnet CSS auf den Button.
     vivaldi_auto_patch.vbs Windows-Wrapper (unsichtbar)
     Vivaldi Patch on Launch.xml  Aufgabenplanung-Export (Windows)
     README.md              diese Datei
+    tests/                 Tests, werden nicht in custom.js übernommen
 ```
 
 ---
@@ -185,6 +206,19 @@ Const AutoStartVivaldi = False
 
 - **Kein Patch trotz Neustart**
   → prüfen, ob `window.bak.html` bereits existiert (dann patcht die BAT nicht mehr)
+
+---
+
+## Tests
+
+```bash
+node --test --test-concurrency=1 tests/*.test.cjs
+```
+
+`--test-concurrency=1` ist nötig, weil die `*-browser.test.cjs`-Tests jeweils ein
+echtes Vivaldi headless starten und sich parallel gegenseitig stören können. Sie
+verwenden ein temporäres Profil, nie das eigene. Eine installierte `custom.js`
+wird dabei mitgeladen; die Tests laufen trotzdem gegen die Dateien im Repo.
 
 ---
 
