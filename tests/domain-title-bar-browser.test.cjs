@@ -116,8 +116,8 @@ const http=require('node:http');
             await call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...tooltipPoint},sessionId);
             assert.equal(await evaluateHere("document.activeElement.id"),'urlFieldInput');
             assert.equal(await evaluateHere("document.querySelector('.UrlBar-UrlFieldWrapper').getAttribute('title')"),null);
-            await evaluateHere("document.querySelector('.webpageview.active.visible webview').focus()");
-            await wait("document.querySelector('.UrlBar-UrlFieldWrapper').title==='Native SPA title'");
+            // Vivaldi can move focus back to the address field shortly after the click, so keep refocusing.
+            await wait("(document.querySelector('.webpageview.active.visible webview').focus(),document.querySelector('.UrlBar-UrlFieldWrapper').title==='Native SPA title')");
             console.log('PASS native input hover inherits the full title and clicking still focuses the address field');
             await evaluateHere(`(async()=>{const tab=await chrome.tabs.create({windowId:vivaldiWindowId,active:false,url:${JSON.stringify(new URL('/second',articleURL).href)}});window.__secondId=tab.id;})()`);
             await wait("(async()=>{const tab=await chrome.tabs.get(__secondId);return tab.status==='complete';})()");

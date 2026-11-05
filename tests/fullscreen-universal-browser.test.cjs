@@ -89,7 +89,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         await f(`for(let i=0;i<3;i++){__mod.toggleFullScreen();__mod.toggleFullScreen();}__mod.hide();__mod.toggleFullScreen()`);
         await delay(400);
         assert.equal(await f('__mod.app.className'), '');
-        assert.equal(await f("(getEventListeners(__mod.webView).pointerenter||[]).length"), 0);
+        assert.equal(await f("(getEventListeners(__mod.webView).pointerenter||[]).filter(entry=>entry.listener===__mod.handlers.hide).length"), 0);
         assert.equal(await f("(getEventListeners(window).resize||[]).length"), 0);
         await f("__mod.webView.dispatchEvent(new Event('pointerenter'));window.dispatchEvent(new Event('resize'))"); await delay(300);
         assert.equal(await f('__mod.app.className'), '');
@@ -102,7 +102,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         const {sessionId:uiSession}=await call('Target.attachToTarget',{targetId:ui.targetId,flatten:true});
         await until("!!document.getElementById('webview-container')&&!!document.getElementById('browser')",uiSession);
         await delay(500);
-        // custom.js can load an older mod. Isolate the checkout in this temporary UI.
+        // custom.js can load another copy of the mod whose observer re-adds its listeners, so
+        // the listener counts below only look at this instance. Isolate the checkout in this temporary UI.
         await evaluate(`(()=>{
             const content=document.getElementById('webview-container');
             for(const type of ['pointerenter','pointerleave']) {
@@ -118,7 +119,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         await evaluate('void (window.__mod=new __FullscreenMod())',uiSession);
         await until("document.getElementById('app').classList.contains('fullscreen-listener-enabled')",uiSession);
         await delay(350);
-        assert.equal(await evaluate("(getEventListeners(__mod.webView).pointerenter||[]).length",uiSession),1);
+        assert.equal(await evaluate("(getEventListeners(__mod.webView).pointerenter||[]).filter(entry=>entry.listener===__mod.handlers.hide).length",uiSession),1);
         const initialHeight=await evaluate('__mod.mainBar.offsetHeight',uiSession);
         await evaluate(`__mod.mainBar.style.cssText+=';height:${initialHeight+20}px!important;min-height:${initialHeight+20}px!important;max-height:none!important'`,uiSession);
         await until(`__mod.app.style.getPropertyValue('--fs-main-bar-height')==='${initialHeight+20}px'`,uiSession);
@@ -131,12 +132,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         assert.equal(await evaluate("(async()=>JSON.stringify(await chrome.storage.local.get('fullScreenModEnabled')))()",uiSession),savedBeforeEditing);
         await evaluate("__mod.browser.classList.remove('toolbar-edit-mode')",uiSession);
         await until("!!__mod.listenerController&&__mod.app.classList.contains('fullscreen-listener-enabled')",uiSession);
-        assert.equal(await evaluate("(getEventListeners(__mod.webView).pointerenter||[]).length",uiSession),1);
+        assert.equal(await evaluate("(getEventListeners(__mod.webView).pointerenter||[]).filter(entry=>entry.listener===__mod.handlers.hide).length",uiSession),1);
         console.log('PASS toolbar editing pauses auto-hide, preserves the saved preference and resumes once');
         await evaluate(`for(let i=0;i<3;i++){__mod.handlers.shortcut(vivaldiWindowId,'F11');__mod.handlers.shortcut(vivaldiWindowId,'F11');}__mod.handlers.shortcut(vivaldiWindowId,'F11')`,uiSession);
         await delay(350);
-        assert.equal(await evaluate("(getEventListeners(__mod.webView).pointerenter||[]).length",uiSession),0);
-        assert.equal(await evaluate("__mod.app.className.includes('hidden-')",uiSession),false);
+        assert.equal(await evaluate("(getEventListeners(__mod.webView).pointerenter||[]).filter(entry=>entry.listener===__mod.handlers.hide).length",uiSession),0);
+        // The installed copy keeps hiding #app here; the fixture above covers the classes without it.
+        assert.equal(await evaluate('__mod.fullscreenEnabled',uiSession),false);
         await evaluate('__mod.destroy()',uiSession);
         console.log('PASS native Vivaldi UI, storage, F11 routing, resize measurement and repeated shutdown');
     } finally {
