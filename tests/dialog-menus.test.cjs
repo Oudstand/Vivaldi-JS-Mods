@@ -45,7 +45,7 @@ function fixture() {
             window, vivaldiWindowId: windowId,
             UrlUtils: {fromSelection: value => (/^https?:\/\//i.test(value?.trim()) ? value.trim() : '')},
             chrome: {extension: {inIncognitoContext: incognito, getViews: () => [core]}, runtime: {getURL: () => url}},
-            console: {debug: (...args) => errors.push(args)}
+            console: {debug: (...args) => errors.push(args), error: (...args) => errors.push(args)}
         });
         const links = [], searches = [];
         const instance = new Class(url => links.push(url), (...args) => searches.push(args), {
@@ -128,6 +128,15 @@ test('menus keep working when the internal Vivaldi menu event is unavailable', a
     await client.instance.ready;
     assert.equal(f.menus.get('search-dialog-tab').title, '[Dialog] Open or search "%s"');
     assert.deepEqual(f.errors, []);
+});
+
+test('a broken menu API does not stop the mod or its search engines', async () => {
+    const f = fixture();
+    delete f.core.chrome.contextMenus.onClicked;
+    const client = f.client(1);
+    await client.instance.ready;
+    assert.equal(client.instance.defaultSearchId, 'normal');
+    assert.equal(f.errors.length, 1);
 });
 
 test('entries left by an earlier UI instance are adopted without duplicate creation', async () => {

@@ -1743,24 +1743,29 @@
                     })
                     .catch(error => console.debug('Dialog mod: Failed to update search menus:', error)));
 
-            menuApi.onClicked.addListener((info, tab) => {
-                const dispatch = windowId => {
-                    const client = state.clients.get(windowId);
-                    Promise.resolve(client?.handleMenuClick(info)).catch(error => console.debug('Dialog mod: Menu action failed:', error));
-                };
-                if (tab?.windowId !== undefined) dispatch(tab.windowId);
-                else core.chrome.windows.getLastFocused(focused => dispatch(focused.id));
-            });
-            // Internal Vivaldi API, fires before the page menu is built. chrome.contextMenus has no such event.
-            core.vivaldi.contextMenu?.onDocumentMenu?.addListener((windowId, documentId, {selection}) => {
-                if (!selection) return;
-                const title = format(UrlUtils.fromSelection(selection) ? config.openSelectionMenuTitle : config.searchSelectionMenuTitle);
-                if (title === state.selectionTitle) return;
-                state.selectionTitle = title;
-                state.pending = state.pending
-                    .then(() => menuCall('update', 'search-dialog-tab', {title}))
-                    .catch(error => console.debug('Dialog mod: Failed to update selection menu title:', error));
-            });
+            // Menus are optional: a changed Vivaldi API must not take shortcuts and dialogs down with them.
+            try {
+                menuApi.onClicked.addListener((info, tab) => {
+                    const dispatch = windowId => {
+                        const client = state.clients.get(windowId);
+                        Promise.resolve(client?.handleMenuClick(info)).catch(error => console.debug('Dialog mod: Menu action failed:', error));
+                    };
+                    if (tab?.windowId !== undefined) dispatch(tab.windowId);
+                    else core.chrome.windows.getLastFocused(focused => dispatch(focused.id));
+                });
+                // Internal Vivaldi API, fires before the page menu is built. chrome.contextMenus has no such event.
+                core.vivaldi.contextMenu?.onDocumentMenu?.addListener((windowId, documentId, {selection}) => {
+                    if (!selection) return;
+                    const title = format(UrlUtils.fromSelection(selection) ? config.openSelectionMenuTitle : config.searchSelectionMenuTitle);
+                    if (title === state.selectionTitle) return;
+                    state.selectionTitle = title;
+                    state.pending = state.pending
+                        .then(() => menuCall('update', 'search-dialog-tab', {title}))
+                        .catch(error => console.debug('Dialog mod: Failed to update selection menu title:', error));
+                });
+            } catch (error) {
+                console.error('Dialog mod: Context menu setup failed:', error);
+            }
             core.vivaldi.searchEngines.onTemplateUrlsChanged.addListener(update);
             update();
             return state;
