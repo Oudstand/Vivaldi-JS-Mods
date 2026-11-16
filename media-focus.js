@@ -3,6 +3,8 @@
  * Works per browser window (tabs and web panels); remembers one interrupted tab.
  * Uses the page's Media Session handlers, like a media key, or falls back to
  * controlling its audio/video elements directly.
+ *
+ * Forum link: https://forum.vivaldi.net/topic/122430/media-focus-automatically-pause-music-when-another-tab-starts-playing
  */
 (() => {
     'use strict';
