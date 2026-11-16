@@ -36,6 +36,44 @@ Die SVGs nutzen `currentColor` und übernehmen damit die
 Ribbon-Vordergrundfarbe. In Vivaldi diese Dateien als eigene Symbole für die
 Kurzbefehle auswählen. Die aktive Markierung zeichnet CSS auf den Button.
 
+`media-focus.js` pausiert den Tab, der gerade Medien abspielt, sobald ein anderer Tab
+oder ein Webpanel hörbar startet (zum Beispiel Spotify → YouTube). Pausiert oder endet
+das neue Medium oder wird sein Tab geschlossen, läuft der vorherige Tab weiter. Manuell
+pausierte Quellen werden nicht neu gestartet. Das gilt innerhalb eines Browserfensters;
+gemerkt wird genau eine unterbrochene Quelle (kein Stapel: A → B → C lässt A pausiert).
+
+Auslöser ist Vivaldis Ereignis `audiostatechanged`. Es meldet nur Hörbarkeit, deshalb
+fragt der Mod zusätzlich in der Seite nach, ob ein Player läuft: über die Media Session
+und die `audio`/`video`-Elemente. Stille Stellen gelten so nicht als Stopp;
+stummgeschaltete Tabs und Töne ohne Player, etwa Benachrichtigungen, unterbrechen nichts.
+
+Pausiert und fortgesetzt wird wie mit einer Medientaste über die `play`/`pause`-Handler,
+die die Seite bei ihrer Media Session anmeldet. Dafür setzt der Mod beim Laden jeder
+Seite einen kleinen Hook auf `MediaSession.setActionHandler` (per `chrome.scripting` in
+der Welt der Seite, unabhängig von deren CSP). Seiten ohne solche Handler werden direkt
+über ihre hörbaren `audio`/`video`-Elemente pausiert. Fortgesetzt wird nur, was der Mod
+selbst pausiert hat.
+
+Spotify meldet keinen Wiedergabezustand (`mediaSession.playbackState` bleibt `none`) und
+hält sein Audio-Element außerhalb des DOM. Eine hörbare Seite mit `pause`-Handler gilt
+deshalb als spielend, solange sie nicht ausdrücklich `paused` meldet. Wird sie still,
+wartet der Mod drei Sekunden, damit ein Titelwechsel nicht als Stopp gilt. Das ist eine
+Faustregel: Eine längere stille Stelle kann wie eine Pause wirken, und wer Spotify selbst
+pausiert und in diesen drei Sekunden ein Video startet, bekommt Spotify danach wieder.
+
+Vivaldi bietet keine bessere Schnittstelle: `vivaldi.tabsPrivate.onMediaStateChanged`
+speist nur das Lautsprecher-Symbol und unterscheidet Stille nicht von Pause; zum
+Pausieren gibt es nichts. Chromiums `AudioFocusEnforcement` wirkt in Vivaldi nicht.
+
+Unter **Einstellungen → Tabs → Tab-Audio stummschalten** die Option
+**Gesamtes Audio wiedergeben** wählen, damit keine zusätzliche Priorisierung durch
+Vivaldi eingreift. Zum Aktivieren den JS-Patch erneut anwenden.
+
+Grenzen: In Seiten, die schon vor dem Mod offen waren, sieht der Hook erst die nächste
+Anmeldung eines Handlers (Spotify meldet sie bei jeder Zustandsänderung neu an). Nicht
+erreichbar sind Player ohne Media-Session-Handler, die nicht als `audio`/`video` im DOM
+stehen (reines Web Audio, Shadow DOM). Webseiten können automatisches Fortsetzen ablehnen.
+
 `dialog.js` öffnet Links und Suchen in einem Dialog über der aktuellen Seite: per
 gehaltener mittlerer Maustaste, über das Kontextmenü oder per Kurzbefehl. Einstellungen
 stehen als Konstanten am Anfang der Datei, zum Beispiel `ICON_CONFIG` und `CONTEXT_MENU_CONFIG`.
@@ -219,6 +257,18 @@ node --test --test-concurrency=1 tests/*.test.cjs
 echtes Vivaldi headless starten und sich parallel gegenseitig stören können. Sie
 verwenden ein temporäres Profil, nie das eigene. Eine installierte `custom.js`
 wird dabei mitgeladen; die Tests laufen trotzdem gegen die Dateien im Repo.
+
+Der Medien-Browsertest führt den Mod in einem echten Vivaldi-Fenster mit Tabs, einem
+Webpanel und einer Spotify-ähnlichen Testseite aus. Die Medienelemente sind simuliert,
+es werden keine Audiodateien abgespielt und keine Testtöne erzeugt:
+
+```bash
+node tests/media-focus-browser.test.cjs
+```
+
+`node tests/media-focus.test.cjs` prüft die A/B-Logik ohne Browser, einschließlich
+verzögerter Befehle, Zeitüberschreitungen, Abfragefehlern, veralteter Audioereignisse
+und Deaktivierung während laufender Abfragen.
 
 ---
 
