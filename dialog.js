@@ -4,7 +4,8 @@
  */
 (() => {
     const UI_CONFIG = {
-            showUrlInput: true // true = shows the URL input in the options container, false = title + buttons only
+            showUrlInput: true, // true = shows the URL input in the options container, false = title + buttons only
+            dialogFullscreen: true // true = page fullscreen (e.g. videos) stays inside the dialog, false = the whole window goes fullscreen
         },
         ICON_CONFIG = {
             linkIcon: '', // available values: 'arrow-up-right', 'info-circle', 'square-outline'; set to '' to disable
@@ -121,10 +122,9 @@
                 }
                 if (!webviewData) return;
 
-                const {webview, lifetime} = webviewData;
-                webview.executeScript({code: DialogFullscreen.EXIT_SCRIPT}, results => {
-                    const failed = Boolean(chrome.runtime.lastError);
-                    if (!lifetime.signal.aborted && (failed || !results?.[0])) this.removeDialog(webview.id);
+                const {webview, lifetime, fullscreen} = webviewData;
+                fullscreen.exitOnEscape().then(handled => {
+                    if (!handled && !lifetime.signal.aborted) this.removeDialog(webview.id);
                 });
             }
         };
@@ -444,7 +444,7 @@
             //#region webview properties
             webview.id = webviewId;
             webview.className = 'dialog-page-webview';
-            new DialogFullscreen(webview, lifetime);
+            this.webviews.get(webviewId).fullscreen = new DialogFullscreen(webview, lifetime, UI_CONFIG.dialogFullscreen);
 
             let titleFetchTimeout;
             lifetime.add(() => clearTimeout(titleFetchTimeout));
@@ -1150,7 +1150,23 @@
         }
     }
 
+    /**
+     * Keeps page fullscreen (e.g. videos) inside the dialog.
+     *
+     * Vivaldi fullscreens the whole window for any page in a tab-backed webview, and there
+     * is no API to prevent that. So the Fullscreen API is emulated inside the page: the
+     * element becomes a popover that fills the dialog, and the window never changes.
+     * Whatever the emulation cannot handle (prefixed APIs, players that kept the original
+     * function, errors) gets native fullscreen instead. The page then renders it at the
+     * webview's size, and the window fullscreen Vivaldi adds is undone right away.
+     */
     class DialogFullscreen {
+        // The window change and the page's fullscreen event arrive ~10 ms apart, in either order.
+        static WINDOW_CHANGE_MS = 500;
+        // An Esc that just ended fullscreen must not close the dialog as well.
+        static ESCAPE_GRACE_MS = 300;
+        static #window = null;
+
         static exitInPage = function () {
             const root = document.documentElement;
             const active = root?.hasAttribute('data-dialog-fullscreen');
@@ -1160,7 +1176,91 @@
         };
         static EXIT_SCRIPT = `(${this.exitInPage.toString()})();`;
 
-        constructor(webview, lifetime) {
+        static #watchWindow() {
+            if (this.#window) return this.#window;
+            // pageFullscreen: {at, owner} of the latest native page fullscreen not yet matched to the window.
+            const tracked = {state: null, previous: null, changedAt: 0, pageFullscreen: null};
+            this.#window = tracked;
+            chrome.windows.get(vivaldiWindowId, info => {
+                if (!chrome.runtime.lastError && tracked.state === null) tracked.state = info.state;
+            });
+            vivaldi.windowPrivate.onStateChanged.addListener((windowId, state) => {
+                if (windowId !== vivaldiWindowId || state === tracked.state) return;
+                tracked.previous = tracked.state;
+                tracked.state = state;
+                tracked.changedAt = Date.now();
+                DialogFullscreen.#restoreWindow();
+            });
+            return tracked;
+        }
+
+        // Undo a window fullscreen that came with a dialog page's fullscreen; one made by the user (F11) stays.
+        static #restoreWindow() {
+            // A user F11 at almost the same moment as a page's fullscreen cannot be told apart by time alone.
+            const tracked = this.#window;
+            if (tracked.state !== 'fullscreen' || !tracked.pageFullscreen) return;
+            const causedByPage = Math.abs(tracked.changedAt - tracked.pageFullscreen.at) <= this.WINDOW_CHANGE_MS;
+            // Each page event is matched against one window fullscreen only.
+            tracked.pageFullscreen = null;
+            if (causedByPage && tracked.previous && tracked.previous !== 'fullscreen') {
+                vivaldi.windowPrivate.setState(vivaldiWindowId, tracked.previous);
+            }
+        }
+
+        #webview;
+        #nativeActive = false;
+        #nativeExitedAt = 0;
+
+        #emulated;
+
+        /**
+         * @param {boolean} keepInDialog false leaves fullscreen to Vivaldi (whole window); Esc still
+         *     ends page fullscreen before it closes the dialog.
+         */
+        constructor(webview, lifetime, keepInDialog = true) {
+            this.#webview = webview;
+            this.#emulated = keepInDialog;
+            if (keepInDialog) this.#injectEmulation(webview, lifetime);
+            const tracked = keepInDialog ? DialogFullscreen.#watchWindow() : null;
+            const forgetPageFullscreen = () => {
+                if (tracked?.pageFullscreen?.owner === this) tracked.pageFullscreen = null;
+            };
+
+            // Vivaldi's own event for native fullscreen; it fires for enter and exit and cannot be cancelled.
+            webview.addEventListener(
+                'fullscreen',
+                event => {
+                    this.#nativeActive = event.enterFullscreen;
+                    if (!event.enterFullscreen) {
+                        this.#nativeExitedAt = Date.now();
+                        forgetPageFullscreen();
+                        return;
+                    }
+                    if (!tracked) return;
+                    tracked.pageFullscreen = {at: Date.now(), owner: this};
+                    DialogFullscreen.#restoreWindow();
+                },
+                {signal: lifetime.signal}
+            );
+            lifetime.add(forgetPageFullscreen);
+        }
+
+        /** Ends page fullscreen; resolves to true when Esc belonged to fullscreen instead of the dialog. */
+        exitOnEscape() {
+            if (this.#nativeActive) {
+                this.#webview.setIsFullscreen(false);
+                return Promise.resolve(true);
+            }
+            if (Date.now() - this.#nativeExitedAt < DialogFullscreen.ESCAPE_GRACE_MS) return Promise.resolve(true);
+            if (!this.#emulated) return Promise.resolve(false);
+            return new Promise(resolve => {
+                this.#webview.executeScript({code: DialogFullscreen.EXIT_SCRIPT}, results => {
+                    resolve(!chrome.runtime.lastError && Boolean(results?.[0]));
+                });
+            });
+        }
+
+        #injectEmulation(webview, lifetime) {
             const inject = async frameId => {
                 const tabId = Number(webview.tab_id);
                 if (lifetime.signal.aborted || !Number.isInteger(tabId) || tabId <= 0) return;
@@ -1187,6 +1287,16 @@
         static installInPage = function () {
             if (window.__dialogFullscreenInstalled) return;
             window.__dialogFullscreenInstalled = true;
+            // Native fullscreen is the fallback; the dialog mod keeps it inside the dialog.
+            const nativeGetter = (proto, name) => (proto && Object.getOwnPropertyDescriptor(proto, name)?.get) || (() => null);
+            const nativeRequest = Element.prototype.requestFullscreen;
+            const nativeExit = globalThis.Document?.prototype.exitFullscreen;
+            const nativeDocumentElement = nativeGetter(globalThis.Document?.prototype, 'fullscreenElement');
+            const nativeShadowElement = nativeGetter(ShadowRoot.prototype, 'fullscreenElement');
+            const native = (action, element, args) => {
+                if (action === 'enter') return nativeRequest ? nativeRequest.apply(element, args) : Promise.reject(new TypeError('Fullscreen is not supported'));
+                return nativeDocumentElement.call(document) && nativeExit ? nativeExit.call(document) : Promise.resolve();
+            };
             let sequence = 0;
             const pending = new Map();
             window.addEventListener('dialog-fullscreen-result', event => {
@@ -1194,41 +1304,47 @@
                     request = pending.get(result?.id);
                 if (!request) return;
                 pending.delete(result.id);
-                if (result.error) request.reject(new TypeError(result.error));
+                if (result.error) request.fallback(result.error);
                 else request.resolve();
             });
-            const request = (action, element) =>
+            const request = (action, element, args = []) =>
                 new Promise((resolve, reject) => {
                     const id = `dialog-${++sequence}`;
                     const marker = element?.getAttribute('data-dialog-fullscreen-request');
-                    pending.set(id, {resolve, reject});
+                    // If the dialog cannot show the element, native fullscreen still beats doing nothing.
+                    const fallback = () => native(action, element, args).then(resolve, reject);
+                    pending.set(id, {resolve, fallback});
                     element?.setAttribute('data-dialog-fullscreen-request', id);
+                    let handled = false;
                     try {
-                        window.dispatchEvent(new CustomEvent('dialog-fullscreen-request', {detail: {id, action}}));
+                        // The controller cancels the event; an uncancelled one had no listener in this frame.
+                        handled = !window.dispatchEvent(new CustomEvent('dialog-fullscreen-request', {detail: {id, action}, cancelable: true}));
                     } finally {
                         if (element) {
                             if (marker === null) element.removeAttribute('data-dialog-fullscreen-request');
                             else element.setAttribute('data-dialog-fullscreen-request', marker);
                         }
                     }
+                    if (!handled && pending.delete(id)) fallback();
                 });
-            Element.prototype.requestFullscreen = function () {
-                return request('enter', this);
+            Element.prototype.requestFullscreen = function (...args) {
+                return request('enter', this, args);
             };
-            const fullscreenElement = root => {
+            const emulatedElement = root => {
                 const session = document.documentElement.getAttribute('data-dialog-fullscreen');
                 if (!session) return null;
                 return root.querySelector(`[data-dialog-fullscreen-player="${session}"], [data-dialog-fullscreen-host="${session}"]`);
             };
-            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: () => fullscreenElement(document)});
+            const documentElement = () => emulatedElement(document) || nativeDocumentElement.call(document) || null;
+            Object.defineProperty(document, 'fullscreenElement', {configurable: true, get: documentElement});
             Object.defineProperty(ShadowRoot.prototype, 'fullscreenElement', {
                 configurable: true,
                 get() {
-                    return fullscreenElement(this);
+                    return emulatedElement(this) || nativeShadowElement.call(this) || null;
                 }
             });
-            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(fullscreenElement(document))});
-            document.exitFullscreen = () => request('exit');
+            Object.defineProperty(document, 'fullscreen', {configurable: true, get: () => Boolean(documentElement())});
+            document.exitFullscreen = () => (emulatedElement(document) ? request('exit') : native('exit'));
         };
 
         static installController = function () {
@@ -1347,7 +1463,14 @@
                 notify(element);
                 return Promise.resolve();
             };
-            const shadowRoot = element => globalThis.chrome?.dom?.openOrClosedShadowRoot(element) || element.shadowRoot;
+            // openOrClosedShadowRoot throws for anything but HTML elements, e.g. SVG icons.
+            const shadowRoot = element => {
+                try {
+                    return globalThis.chrome?.dom?.openOrClosedShadowRoot(element) || element.shadowRoot;
+                } catch {
+                    return element.shadowRoot;
+                }
+            };
             const findElement = (root, matches) => {
                 for (const element of root.querySelectorAll('*')) {
                     if (matches(element)) return element;
@@ -1360,8 +1483,19 @@
             window.addEventListener('dialog-fullscreen-request', event => {
                 const {id, action} = event.detail || {};
                 if (typeof id !== 'string' || !['enter', 'exit'].includes(action)) return;
-                const element = action === 'enter' && findElement(document, candidate => candidate.getAttribute('data-dialog-fullscreen-request') === id);
-                const operation = action === 'exit' ? exit() : element ? enter(element) : Promise.reject(new TypeError('Fullscreen element is detached'));
+                event.preventDefault();
+                // Every accepted request must answer; an error lets the page fall back to native fullscreen.
+                let operation;
+                try {
+                    // Players in the regular DOM are found directly; only encapsulated ones need the deep search.
+                    const element =
+                        action === 'enter' &&
+                        (document.querySelector(`[data-dialog-fullscreen-request="${CSS.escape(id)}"]`) ||
+                            findElement(document, candidate => candidate.getAttribute('data-dialog-fullscreen-request') === id));
+                    operation = action === 'exit' ? exit() : element ? enter(element) : Promise.reject(new TypeError('Fullscreen element is detached'));
+                } catch (error) {
+                    operation = Promise.reject(error);
+                }
                 operation.then(
                     () => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id}})),
                     error => window.dispatchEvent(new CustomEvent('dialog-fullscreen-result', {detail: {id, error: error.message}}))
